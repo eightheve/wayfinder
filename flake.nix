@@ -69,7 +69,7 @@
 
                 # Sandbox
                 ProtectSystem = "strict";
-                ReadWritePaths = [ cfg.stateDir "/home/wayfinder" ];
+                ReadWritePaths = [ cfg.stateDir "/home/wayfinder" "/srv/wayfinder" ];
                 NoNewPrivileges = true;
                 PrivateTmp = true;
                 ProtectHome = "read-only";
