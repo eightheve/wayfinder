@@ -4,25 +4,37 @@
   [{:type "function"
     :function
     {:name "summarize-item"
-     :description "Replace an item's content with a shorter summary"
+     :description "Replace an item's content with a shorter summary. Set remember=true to also file the original content to long-term memory before summarizing — use this for any item containing knowledge worth retaining indefinitely."
      :parameters
      {:type "object"
       :properties
       {:id {:type "integer"
             :description "The ID of the item to summarize"}
        :summary {:type "string"
-                 :description "The shortened summary to replace the item's data"}}
+                 :description "The shortened summary to replace the item's data"}
+       :remember {:type "boolean"
+                  :description "If true, file the item's original content to long-term memory before summarizing. Use for anything worth keeping indefinitely."}}
       :required ["id" "summary"]}}}
 
    {:type "function"
     :function
     {:name "forget-item"
-     :description "Remove an item from context entirely"
+     :description "Remove an item from context entirely. Items previously filed to long-term memory (remember=true on summarize) will not be re-filed when forgotten."
      :parameters
      {:type "object"
       :properties
       {:id {:type "integer"
             :description "The ID of the item to forget"}}
+      :required ["id"]}}}
+   {:type "function"
+    :function
+    {:name "file-to-memory"
+     :description "File an item's content to long-term memory without summarizing it. Use this for items that contain important knowledge but are already concise enough to stay in context as-is."
+     :parameters
+     {:type "object"
+      :properties
+      {:id {:type "integer"
+            :description "The ID of the item to file to long-term memory"}}
       :required ["id"]}}}])
 
 (def scribe-tool-definitions

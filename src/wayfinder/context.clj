@@ -14,8 +14,9 @@
                    item))
                (:items ctx))))
 
-(defn summarize-item [ctx id data]
-  (update-item ctx id {:salience :summarized :data data}))
+(defn summarize-item [ctx id data remembered?]
+  (update-item ctx id (cond-> {:salience :summarized :data data}
+                        remembered? (assoc :remembered true))))
 
 (defn forget-item [ctx id]
   (update-item ctx id {:salience :forgotten}))
