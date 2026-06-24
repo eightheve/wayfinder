@@ -36,4 +36,4 @@
                      (:status resp) (trunc (:body resp) 500)))
           (throw (ex-info (str "LLM request failed: status " (:status resp))
                    {:status (:status resp)
-                    :body (:body resp)}))))))
+                    :body (:body resp)})))))))
