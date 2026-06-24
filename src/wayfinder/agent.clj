@@ -111,7 +111,10 @@
             (println (format "[agent] Context at %d items (threshold %d), triggering compaction"
                        item-count threshold))
             (reset! last-compact start)
-            (compactor/compact ctx cfg target))
+            (try
+              (compactor/compact ctx cfg target)
+              (catch Exception e
+                (println (format "[agent] Compaction failed: %s" (.getMessage e))))))
           (let [next-result (process-turn ctx cfg)]
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))

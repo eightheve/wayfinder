@@ -5,6 +5,12 @@
             [wayfinder.tools :as tools]
             [cheshire.core :as json]))
 
+(defn- trunc [s max-len]
+  (let [s (str s)]
+    (if (> (count s) max-len)
+      (str (subs s 0 max-len) "...")
+      s)))
+
 (defn format-context-for-compaction [ctx]
   (->> (context/fetch-context ctx)
        (map (fn [item]
@@ -12,7 +18,7 @@
                 (:id item)
                 (name (:type item))
                 (name (:salience item))
-                (pr-str (:data item)))))
+                (trunc (pr-str (:data item)) 500))))
        (clojure.string/join "\n")))
 
 (defn parse-compactor-calls [response]
