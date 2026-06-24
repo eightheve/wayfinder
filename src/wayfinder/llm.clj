@@ -18,16 +18,22 @@
         resp @(http/post url
                {:headers {"Content-Type" "application/json"
                           "Authorization" (str "Bearer " api-key)}
-                :body body})]
-    (if (= 200 (:status resp))
-      (-> (:body resp)
-          (json/parse-string true)
-          :choices
-          first
-          :message)
+                :body body
+                :timeout 120000})]
+    (if (:error resp)
       (do
-        (println (format "[llm] Request failed: status %d, body: %s"
-                   (:status resp) (trunc (:body resp) 500)))
-        (throw (ex-info (str "LLM request failed: status " (:status resp))
-                 {:status (:status resp)
-                  :body (:body resp)}))))))
+        (println (format "[llm] Request error: %s" (.getMessage (:error resp))))
+        (throw (ex-info (str "LLM request error: " (.getMessage (:error resp)))
+                 {:error (:error resp)})))
+      (if (= 200 (:status resp))
+        (-> (:body resp)
+            (json/parse-string true)
+            :choices
+            first
+            :message)
+        (do
+          (println (format "[llm] Request failed: status %d, body: %s"
+                     (:status resp) (trunc (:body resp) 500)))
+          (throw (ex-info (str "LLM request failed: status " (:status resp))
+                   {:status (:status resp)
+                    :body (:body resp)}))))))

@@ -13,6 +13,7 @@
 
 (defn format-context-for-compaction [ctx]
   (->> (context/fetch-context ctx)
+       (take 100)
        (map (fn [item]
               (format "[%d] %s (%s) — %s"
                 (:id item)
@@ -28,12 +29,6 @@
         {:action-type (keyword (:name func))
          :params (try (json/parse-string (:arguments func) true)
                       (catch Exception _ {}))}))))
-
-(defn- trunc [s max-len]
-  (let [s (str s)]
-    (if (> (count s) max-len)
-      (str (subs s 0 max-len) "...")
-      s)))
 
 (defn- file-to-scribe [cfg items]
   (when (seq items)
@@ -88,7 +83,7 @@
     (println (format "[compactor] Running compaction (%d items, target %d)" item-count target))
     (let [messages [{:role "system"
                      :content (str "You are a context compactor. Your job is to reduce context size by summarizing and forgetting items.\n\n"
-                                   "Current context has " item-count " items. Target is " target " items.\n\n"
+                                   "Current context has " item-count " items (you see the 100 oldest). Target is " target " items.\n\n"
                                    "Guidelines:\n"
                                    "- Prioritize compacting OLD items first — items with lower IDs are older and more likely to be summarizable.\n"
                                    "- Do NOT summarize or forget items from the last few turns (high IDs near " item-count "). The agent needs recent context to function.\n"
@@ -96,7 +91,6 @@
                                    "- Set remember=true on summarize-item for any item containing knowledge worth retaining indefinitely (facts, configs, decisions, architecture). This files the original content to long-term memory before summarizing.\n"
                                    "- Use forget-item only for truly trivial details (greetings, acknowledgments, \"message sent\" confirmations) or items so old they're irrelevant.\n"
                                    "- Use file-to-memory for concise items that contain important knowledge but don't need summarizing — this marks them as remembered without changing them.\n"
-                                   "- NEVER touch item id 0, the system prompt.\n"
                                    "- Batch your actions — issue multiple tool calls in a single response to compact efficiently.")}
                     {:role "user"
                      :content context-str}]

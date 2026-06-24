@@ -35,8 +35,8 @@
     (.mkdirs (java.io.File. dir))
     (spit (str dir "/context") (with-out-str (clojure.pprint/pprint @ctx)))))
 
-(defn call-llm [ctx cfg]
-  (let [messages (prompt/assemble @ctx)
+(defn call-llm [ctx cfg system-prompt]
+  (let [messages (prompt/assemble @ctx system-prompt)
         base-url (:base-url cfg)
         api-key (:api-key cfg)
         model (get-in cfg [:models :small])]
@@ -73,8 +73,8 @@
                   {:caused-by action-id :content (:content result)})]
           nil)))))
 
-(defn process-turn [ctx cfg]
-  (let [response (call-llm ctx cfg)]
+(defn process-turn [ctx cfg system-prompt]
+  (let [response (call-llm ctx cfg system-prompt)]
     (if-let [actions (seq (parse-tool-calls response))]
       (loop [actions actions wait-info nil]
         (if-let [action (first actions)]
@@ -88,13 +88,12 @@
 
 (defn run [cfg]
   (let [ctx (atom {:items [] :next-id 0})
+        system-prompt (load-system-prompt (or (:prompts-dir cfg) "prompts"))
         monitor (Object.)
         threshold (or (:compact-threshold cfg) 60)
         target (or (:compact-target cfg) 40)
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
         last-compact (atom 0)]
-    (swap! ctx context/add-item :system-prompt
-      {:content (load-system-prompt (or (:prompts-dir cfg) "prompts"))})
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds"
                threshold target (or (:compact-cooldown cfg) 120)))
@@ -115,6 +114,6 @@
               (compactor/compact ctx cfg target)
               (catch Exception e
                 (println (format "[agent] Compaction failed: %s" (.getMessage e))))))
-          (let [next-result (process-turn ctx cfg)]
+          (let [next-result (process-turn ctx cfg system-prompt)]
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))
