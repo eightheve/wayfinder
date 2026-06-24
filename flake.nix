@@ -38,10 +38,11 @@
 
           config = lib.mkIf cfg.enable {
             users.users.${cfg.user} = {
-              isSystemUser = true;
+              isNormalUser = true;
               group = cfg.user;
-              home = cfg.stateDir;
+              home = "/home/wayfinder";
               createHome = true;
+              hashedPassword = "#!"
             };
             users.groups.${cfg.user} = {};
 
@@ -60,11 +61,30 @@
                 Type = "simple";
                 User = cfg.user;
                 Group = cfg.user;
-                WorkingDirectory = "${self}";
+                WorkingDirectory = cfg.stateDir;
                 ExecStart = "${pkgs.clojure}/bin/clojure -M:run";
                 Restart = "on-failure";
                 RestartSec = "10";
                 StateDirectory = "wayfinder";
+
+                # Sandbox
+                ProtectSystem = "strict";
+                ReadWritePaths = [ cfg.stateDir "/home/wayfinder" ];
+                NoNewPrivileges = true;
+                PrivateTmp = true;
+                ProtectHome = "read-only";
+                RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
+                ProtectKernelTunables = true;
+                ProtectKernelModules = true;
+                ProtectClock = true;
+                CapabilityBoundingSet = [ "" ];
+                LockPersonality = true;
+                ProtectHostname = true;
+                ProtectControlGroups = true;
+                RestrictRealtime = true;
+                RestrictSUIDSGID = true;
+                SystemCallFilter = [ "@system-service" "~@privileged" ];
+                SystemCallErrorNumber = "EPERM";
               };
             };
           };
