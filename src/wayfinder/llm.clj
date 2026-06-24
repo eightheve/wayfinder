@@ -9,7 +9,6 @@
                         :reasoning {:effort "medium"}
                         :messages messages}
                  (seq tools) (assoc :tools tools)))
-        _ (prn body)
         resp @(http/post url
                {:headers {"Content-Type" "application/json"
                           "Authorization" (str "Bearer " api-key)}

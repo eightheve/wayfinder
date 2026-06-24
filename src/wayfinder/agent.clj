@@ -30,8 +30,10 @@
                       (catch Exception _ {}))
          :call-id (:id call)}))))
 
-(defn dump-context [ctx]
-  (spit "/tmp/wayfinder/context" (with-out-str (clojure.pprint/pprint @ctx))))
+(defn dump-context [ctx cfg]
+  (let [dir (str (or (:state-dir cfg) "/var/lib/wayfinder") "/debug")]
+    (.mkdirs (java.io.File. dir))
+    (spit (str dir "/context") (with-out-str (clojure.pprint/pprint @ctx)))))
 
 (defn call-llm [ctx cfg]
   (let [messages (prompt/assemble @ctx)
@@ -95,5 +97,5 @@
         (let [_ (when (context/needs-compact? @ctx (or (:compact-budget cfg) 40))
                   (compactor/compact ctx cfg))
               next-result (process-turn ctx cfg)]
-          (dump-context ctx)
+          (dump-context ctx cfg)
           (recur (or (:delay next-result) default-delay)))))))
