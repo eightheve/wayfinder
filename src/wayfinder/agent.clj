@@ -88,23 +88,30 @@
 
 (defn run [cfg]
   (let [ctx (atom {:items [] :next-id 0})
-        monitor (Object.)]
+        monitor (Object.)
+        threshold (or (:compact-threshold cfg) 60)
+        target (or (:compact-target cfg) 40)
+        cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
+        last-compact (atom 0)]
     (swap! ctx context/add-item :system-prompt
       {:content (load-system-prompt (or (:prompts-dir cfg) "prompts"))})
     (start-message-watcher ctx cfg monitor)
-    (println "Wayfinder agent running. Connected to Matrix.")
+    (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds"
+               threshold target (or (:compact-cooldown cfg) 120)))
     (loop [delay default-delay]
       (let [start (System/currentTimeMillis)]
         (try
           (locking monitor (.wait monitor delay))
           (catch InterruptedException _))
         (let [item-count (count (:items @ctx))
-              needs-compact (context/needs-compact? @ctx (or (:compact-budget cfg) 40))]
-          (when needs-compact
-            (println (format "[agent] Context at %d items (budget %d), triggering compaction"
-                       item-count (or (:compact-budget cfg) 40))))
-          (when needs-compact
-            (compactor/compact ctx cfg))
+              needs-compact (context/needs-compact? @ctx threshold)
+              elapsed-since (- start @last-compact)
+              can-compact (> elapsed-since cooldown-ms)]
+          (when (and needs-compact can-compact)
+            (println (format "[agent] Context at %d items (threshold %d), triggering compaction"
+                       item-count threshold))
+            (reset! last-compact start)
+            (compactor/compact ctx cfg target))
           (let [next-result (process-turn ctx cfg)]
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))

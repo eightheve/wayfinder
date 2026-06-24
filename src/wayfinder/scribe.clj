@@ -52,6 +52,18 @@
       (str (subs s 0 max-len) "...")
       s)))
 
+(defn- extract-content [data]
+  (if (map? data) (:content data) (str data)))
+
+(defn- format-item [item]
+  (let [content (or (extract-content (:data item)) "(no content)")
+        tag (if (:remembered item) "REMEMBER" "FORGET")]
+    (format "[%d] %s/%s — %s"
+      (:id item)
+      (name (:type item))
+      tag
+      content)))
+
 (defn- execute-scribe-action [dir action]
   (let [{:keys [action-type params]} action]
     (case action-type
@@ -89,25 +101,23 @@
 (defn file-memories [cfg items]
   (println (format "[scribe] file-memories called with %d items" (count items)))
   (let [dir (ensure-dir (memory-dir cfg))
-        items-str (->> items
-                       (map (fn [item]
-                              (format "[%d] %s — %s"
-                                (:id item)
-                                (name (:type item))
-                                (pr-str (:data item)))))
-                       (clojure.string/join "\n"))
+        items-str (->> items (map format-item) (clojure.string/join "\n"))
         index (scan-index dir)
         index-str (->> index
                        (map #(str (:path %) " — " (:summary %)))
                        (clojure.string/join "\n"))
         messages [{:role "system"
-                   :content (str "You are the Scribe, a memory filing agent. You receive items that have been forgotten from the main agent's context. "
-                                 "Decide whether each item is worth keeping in long-term memory. If it is, file it as a memory. "
-                                 "If it duplicates or extends an existing memory, read it first and then overwrite it with merged content. "
-                                 "If the item is not worth keeping, simply do nothing.\n\n"
+                   :content (str "You are the Scribe, a memory filing agent. You receive items from the agent's context that need to be filed to long-term memory.\n\n"
+                                 "Rules:\n"
+                                 "- Items tagged REMEMBER were explicitly flagged by the compactor as worth keeping. You MUST write these to memory.\n"
+                                 "- Items tagged FORGET were removed from context. Write them only if they contain useful knowledge (facts, decisions, observations).\n"
+                                 "- Skip only items that are truly empty or nonsensical (error messages, empty results).\n"
+                                 "- When multiple items relate to the same topic, merge them into a single memory file.\n"
+                                 "- The first line of each memory file must be a one-line summary of its content.\n"
+                                 "- Choose descriptive filenames organized by topic (e.g. 'system/hostname.md', 'facts/admin-name.md').\n\n"
                                  "Current memory index:\n" (or index-str "No memories stored"))}
                   {:role "user"
-                   :content (str "Forgotten items to process:\n\n" items-str)}]]
+                   :content (str "Items to file:\n\n" items-str)}]]
     (let [results (run-scribe-turn cfg dir messages)]
       (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
       results)))

@@ -21,8 +21,8 @@
 (defn forget-item [ctx id]
   (update-item ctx id {:salience :forgotten}))
 
-(defn needs-compact? [ctx budget]
-  (> (count (:items ctx)) budget))
+(defn needs-compact? [ctx threshold]
+  (> (count (:items ctx)) threshold))
 
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))

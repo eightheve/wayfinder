@@ -76,18 +76,20 @@
         nil))
     (file-to-scribe cfg (concat @to-remember @forgotten))))
 
-(defn compact [ctx cfg]
+(defn compact [ctx cfg target]
   (let [item-count (count (:items @ctx))
         context-str (format-context-for-compaction @ctx)]
-    (println (format "[compactor] Running compaction (%d items in context)" item-count))
+    (println (format "[compactor] Running compaction (%d items, target %d)" item-count target))
     (let [messages [{:role "system"
                      :content (str "You are a context compactor. Your job is to reduce context size by summarizing and forgetting items.\n\n"
+                                   "Current context has " item-count " items. Target is " target " items.\n\n"
                                    "Guidelines:\n"
+                                   "- Prioritize compacting OLD items first — items with lower IDs are older and more likely to be summarizable.\n"
+                                   "- Do NOT summarize or forget items from the last few turns (high IDs near " item-count "). The agent needs recent context to function.\n"
                                    "- Use summarize-item liberally to compress large or verbose items into concise summaries.\n"
                                    "- Set remember=true on summarize-item for any item containing knowledge worth retaining indefinitely (facts, configs, decisions, architecture). This files the original content to long-term memory before summarizing.\n"
                                    "- Use forget-item only for truly trivial details (greetings, acknowledgments, \"message sent\" confirmations) or items so old they're irrelevant.\n"
                                    "- Use file-to-memory for concise items that contain important knowledge but don't need summarizing — this marks them as remembered without changing them.\n"
-                                   "- The agent needs its context to function: over-forgetting will cripple it. When in doubt, summarize instead of forget.\n"
                                    "- NEVER touch item id 0, the system prompt.\n"
                                    "- Batch your actions — issue multiple tool calls in a single response to compact efficiently.")}
                     {:role "user"
