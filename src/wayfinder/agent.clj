@@ -7,7 +7,8 @@
             [wayfinder.compactor :as compactor]
             [wayfinder.scribe :as scribe]
             [wayfinder.matrix :as matrix]
-            [cheshire.core :as json])
+            [cheshire.core :as json]
+            [clojure.pprint])
   (:import [java.io File]))
 
 (def default-delay 5000)
