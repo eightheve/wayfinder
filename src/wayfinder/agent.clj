@@ -40,6 +40,7 @@
         base-url (:base-url cfg)
         api-key (:api-key cfg)
         model (get-in cfg [:models :small])]
+    (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
     (llm/complete base-url api-key model messages tools/tool-definitions)))
 
 (defn execute-and-record [ctx cfg action]
@@ -49,10 +50,12 @@
           nil)
       (if (= action-type :wait)
         (let [secs (max 5 (min 300 (:seconds params)))]
+          (println (format "[agent] WAIT %ds" secs))
           {:delay (* secs 1000)})
         (let [_ (swap! ctx context/add-item :action
                   {:action-type action-type :params params :call-id call-id})
               action-id (dec (:next-id @ctx))
+              _ (println (format "[agent] EXEC %s (item %d)" (name action-type) action-id))
               result (if (= action-type :send-message)
                        (do (matrix/send-message cfg (:content params))
                            {:content "Message sent"})
@@ -64,6 +67,7 @@
                                                       :command (:command params)
                                                       :path (:path params)})
                             (catch Exception e
+                              (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
                               {:content (str "Error: " (.getMessage e))}))))
               _ (swap! ctx context/add-item :action-result
                   {:caused-by action-id :content (:content result)})]
@@ -94,8 +98,13 @@
         (try
           (locking monitor (.wait monitor delay))
           (catch InterruptedException _))
-        (let [_ (when (context/needs-compact? @ctx (or (:compact-budget cfg) 40))
-                  (compactor/compact ctx cfg))
-              next-result (process-turn ctx cfg)]
-          (dump-context ctx cfg)
-          (recur (or (:delay next-result) default-delay)))))))
+        (let [item-count (count (:items @ctx))
+              needs-compact (context/needs-compact? @ctx (or (:compact-budget cfg) 40))]
+          (when needs-compact
+            (println (format "[agent] Context at %d items (budget %d), triggering compaction"
+                       item-count (or (:compact-budget cfg) 40))))
+          (when needs-compact
+            (compactor/compact ctx cfg))
+          (let [next-result (process-turn ctx cfg)]
+            (dump-context ctx cfg)
+            (recur (or (:delay next-result) default-delay))))))))

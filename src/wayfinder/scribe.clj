@@ -46,6 +46,12 @@
          :params (try (json/parse-string (:arguments func) true)
                       (catch Exception _ {}))}))))
 
+(defn- trunc [s max-len]
+  (let [s (str s)]
+    (if (> (count s) max-len)
+      (str (subs s 0 max-len) "...")
+      s)))
+
 (defn- execute-scribe-action [dir action]
   (let [{:keys [action-type params]} action]
     (case action-type
@@ -54,11 +60,19 @@
                                       (map #(str (:path %) " — " (:summary %)))
                                       (clojure.string/join "\n"))
                                  "No memories stored")}
-      :read-memory {:content (read-memory-file dir (:path params))}
-      :write-memory {:content (do (write-memory-file dir (:filename params) (:content params))
-                                  "Memory written")}
-      :delete-memory {:content (do (delete-memory-file dir (:path params))
-                                   "Memory deleted")}
+      :read-memory (do
+                     (println (format "[scribe] READ %s" (:path params)))
+                     {:content (read-memory-file dir (:path params))})
+      :write-memory (do
+                      (println (format "[scribe] WRITE %s — %s"
+                                 (:filename params)
+                                 (trunc (get params :content "") 120)))
+                      {:content (do (write-memory-file dir (:filename params) (:content params))
+                                    "Memory written")})
+      :delete-memory (do
+                       (println (format "[scribe] DELETE %s" (:path params)))
+                       {:content (do (delete-memory-file dir (:path params))
+                                     "Memory deleted")})
       {:content "Unknown action"})))
 
 (defn- run-scribe-turn [cfg dir messages]
@@ -73,6 +87,7 @@
       [])))
 
 (defn file-memories [cfg items]
+  (println (format "[scribe] file-memories called with %d items" (count items)))
   (let [dir (ensure-dir (memory-dir cfg))
         items-str (->> items
                        (map (fn [item]
@@ -93,9 +108,12 @@
                                  "Current memory index:\n" (or index-str "No memories stored"))}
                   {:role "user"
                    :content (str "Forgotten items to process:\n\n" items-str)}]]
-    (run-scribe-turn cfg dir messages)))
+    (let [results (run-scribe-turn cfg dir messages)]
+      (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
+      results)))
 
 (defn recall [ctx cfg query]
+  (println (format "[scribe] RECALL query: %s" (trunc query 100)))
   (let [dir (ensure-dir (memory-dir cfg))
         index (scan-index dir)
         index-str (->> index
@@ -109,8 +127,9 @@
                    :content (str "Recall query: " query)}]
         results (run-scribe-turn cfg dir messages)]
     (when (seq results)
-      (swap! ctx context/add-item :memory
-        {:content (->> results
-                       (map :content)
-                       (remove #(= "No memories stored" %))
-                       (clojure.string/join "\n\n"))}))))
+      (let [content (->> results
+                         (map :content)
+                         (remove #(= "No memories stored" %))
+                         (clojure.string/join "\n\n"))]
+        (println (format "[scribe] RECALL returned %d results, %d chars" (count results) (count content)))
+        (swap! ctx context/add-item :memory {:content content})))))
