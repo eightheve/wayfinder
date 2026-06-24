@@ -42,7 +42,7 @@
               group = cfg.user;
               home = "/home/wayfinder";
               createHome = true;
-              hashedPassword = "#!"
+              hashedPassword = "#!";
             };
             users.groups.${cfg.user} = {};
 
