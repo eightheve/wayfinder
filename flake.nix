@@ -61,7 +61,7 @@
                 Type = "simple";
                 User = cfg.user;
                 Group = cfg.user;
-                WorkingDirectory = cfg.stateDir;
+                WorkingDirectory = "${self}";
                 ExecStart = "${pkgs.clojure}/bin/clojure -M:run";
                 Restart = "on-failure";
                 RestartSec = "10";
