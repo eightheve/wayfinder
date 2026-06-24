@@ -7,7 +7,7 @@
 
 (defmethod render-item :summarized [item]
   {:role "user"
-   :content (:content (:data item))})
+   :content (str "[context summary] " (:content (:data item)))})
 
 (defmethod render-item :system-prompt [item]
   {:role "system"
@@ -15,7 +15,7 @@
 
 (defmethod render-item :notification [item]
   {:role "user"
-   :content (:content (:data item))})
+   :content (str "[notification] " (:content (:data item)))})
 
 (defmethod render-item :user-message [item]
   {:role "user"
@@ -41,7 +41,7 @@
 
 (defmethod render-item :memory [item]
   {:role "user"
-   :content (str "Long-term memory recall: " (:content (:data item)))})
+   :content (str "[memory recall] " (:content (:data item)))})
 
 (defmethod render-item :default [item]
   {:role "user"

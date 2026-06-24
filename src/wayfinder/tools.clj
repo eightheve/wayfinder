@@ -95,6 +95,14 @@
 
    {:type "function"
     :function
+    {:name "check-messages"
+     :description "Check if there are any unread messages. Returns list of pending message IDs with previews."
+     :parameters
+     {:type "object"
+      :properties {}}}}
+
+   {:type "function"
+    :function
     {:name "view-message"
      :description "View the full content of a pending message"
      :parameters

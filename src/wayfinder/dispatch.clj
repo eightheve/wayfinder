@@ -5,7 +5,20 @@
 
 (def pending-messages (atom {}))
 
+(defn- trunc [s max-len]
+  (let [s (str s)]
+    (if (> (count s) max-len)
+      (str (subs s 0 max-len) "...")
+      s)))
+
 (defmulti execute-action :action-type)
+
+(defmethod execute-action :check-messages [_]
+  (if-let [msgs (seq @pending-messages)]
+    {:content (->> msgs
+                   (map (fn [[id msg]] (format "id %d: %s" id (trunc msg 80))))
+                   (clojure.string/join "\n"))}
+    {:content "No unread messages."}))
 
 (defmethod execute-action :view-message [{:keys [message-id]}]
   (if-let [msg (get @pending-messages message-id)]
