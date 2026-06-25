@@ -21,11 +21,11 @@
 (defn forget-item [ctx id]
   (update ctx :items (fn [items] (filterv #(not= id (:id %)) items))))
 
-(defn needs-compact? [ctx threshold]
-  (> (count (fetch-context ctx)) threshold))
-
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))
+
+(defn needs-compact? [ctx threshold]
+  (> (count (fetch-context ctx)) threshold))
 
 (defn fetch-id [ctx id]
   (filter #(= id (:id %)) (:items ctx)))
