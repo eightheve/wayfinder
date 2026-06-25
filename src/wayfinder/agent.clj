@@ -35,8 +35,8 @@
     (.mkdirs (java.io.File. dir))
     (spit (str dir "/context") (with-out-str (clojure.pprint/pprint @ctx)))))
 
-(defn call-llm [ctx cfg system-prompt]
-  (let [messages (prompt/assemble @ctx system-prompt)
+(defn call-llm [ctx cfg system-prompt idle-count]
+  (let [messages (prompt/assemble @ctx system-prompt idle-count)
         base-url (:base-url cfg)
         api-key (:api-key cfg)
         model (get-in cfg [:models :small])]
@@ -73,27 +73,32 @@
                   {:caused-by action-id :content (:content result)})]
           nil)))))
 
-(defn process-turn [ctx cfg system-prompt]
-  (let [response (call-llm ctx cfg system-prompt)]
+(defn process-turn [ctx cfg system-prompt idle-count]
+  (let [response (call-llm ctx cfg system-prompt idle-count)]
     (if-let [actions (seq (parse-tool-calls response))]
-      (loop [actions actions wait-info nil]
+      (loop [actions actions wait-info nil productive? false]
         (if-let [action (first actions)]
-          (let [result (execute-and-record ctx cfg action)]
-            (recur (rest actions) (or wait-info result)))
-          wait-info))
-      nil)))
+          (let [result (execute-and-record ctx cfg action)
+                productive? (or productive?
+                              (and (not= :wait (:action-type action))
+                                   (not= :reason (:action-type action))))]
+            (recur (rest actions) (or wait-info result) productive?))
+          {:delay (:delay wait-info) :productive? productive?}))
+      {:delay nil :productive? false})))
 
 (defn start-message-watcher [ctx cfg monitor]
   (matrix/sync-loop ctx cfg monitor))
 
 (defn run [cfg]
-  (let [ctx (atom {:items [] :next-id 0})
+  (let [_ (System/setProperty "user.dir" (or (:home-dir cfg) "/home/wayfinder"))
+        ctx (atom {:items [] :next-id 0})
         system-prompt (load-system-prompt (or (:prompts-dir cfg) "prompts"))
         monitor (Object.)
         threshold (or (:compact-threshold cfg) 60)
         target (or (:compact-target cfg) 40)
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
-        last-compact (atom 0)]
+        last-compact (atom 0)
+        idle-count (atom 0)]
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds"
                threshold target (or (:compact-cooldown cfg) 120)))
@@ -114,6 +119,9 @@
               (compactor/compact ctx cfg target)
               (catch Exception e
                 (println (format "[agent] Compaction failed: %s" (.getMessage e))))))
-          (let [next-result (process-turn ctx cfg system-prompt)]
+          (let [next-result (process-turn ctx cfg system-prompt @idle-count)]
+            (if (:productive? next-result)
+              (reset! idle-count 0)
+              (swap! idle-count inc))
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))

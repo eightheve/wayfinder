@@ -91,15 +91,26 @@
   (let [response (llm/complete (:base-url cfg) (:api-key cfg)
                    (get-in cfg [:models :small]) messages tools/scribe-tool-definitions "low")]
     (if-let [actions (seq (parse-scribe-calls response))]
-      (loop [actions actions results []]
-        (if-let [action (first actions)]
-          (let [result (execute-scribe-action dir action)]
-            (recur (rest actions) (conj results result)))
-          results))
-      [])))
+      (do
+        (println (format "[scribe] LLM returned %d actions: %s"
+                   (count actions)
+                   (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
+        (loop [actions actions results []]
+          (if-let [action (first actions)]
+            (let [result (execute-scribe-action dir action)]
+              (recur (rest actions) (conj results result)))
+            results)))
+      (do
+        (println (format "[scribe] LLM returned no tool calls. Content: %s" (trunc (or (:content response) "(nil)") 200)))
+        []))))
 
 (defn file-memories [cfg items]
   (println (format "[scribe] file-memories called with %d items" (count items)))
+  (doseq [item items]
+    (println (format "[scribe]   item %d: %s/%s — %s"
+               (:id item) (name (:type item))
+               (if (:remembered item) "REMEMBER" "FORGET")
+               (trunc (or (extract-content (:data item)) "(nil)") 100))))
   (let [dir (ensure-dir (memory-dir cfg))
         items-str (->> items (map format-item) (clojure.string/join "\n"))
         index (scan-index dir)
@@ -107,17 +118,18 @@
                        (map #(str (:path %) " — " (:summary %)))
                        (clojure.string/join "\n"))
         messages [{:role "system"
-                   :content (str "You are the Scribe, a memory filing agent. You receive items from the agent's context that need to be filed to long-term memory.\n\n"
+                   :content (str "You are the Scribe. Your ONLY job is to write memory files. You receive items and you MUST write them to disk.\n\n"
                                  "Rules:\n"
-                                 "- Items tagged REMEMBER were explicitly flagged by the compactor as worth keeping. You MUST write these to memory.\n"
-                                 "- Items tagged FORGET were removed from context. Write them only if they contain useful knowledge (facts, decisions, observations).\n"
-                                 "- Skip only items that are truly empty or nonsensical (error messages, empty results).\n"
-                                 "- When multiple items relate to the same topic, merge them into a single memory file.\n"
-                                 "- The first line of each memory file must be a one-line summary of its content.\n"
-                                 "- Choose descriptive filenames organized by topic (e.g. 'system/hostname.md', 'facts/admin-name.md').\n\n"
-                                 "Current memory index:\n" (or index-str "No memories stored"))}
+                                 "- REMEMBER items MUST be written. No exceptions.\n"
+                                 "- FORGET items MUST be written unless they are truly empty or are pure error messages with no informational content.\n"
+                                 "- Greetings, acknowledgments, \"message sent\" confirmations — still write these if they contain any factual content about the system or conversation.\n"
+                                 "- Merge related items into one file. Write unrelated items to separate files.\n"
+                                 "- First line of every file: a one-line summary.\n"
+                                 "- Filenames by topic: 'system/hostname.md', 'facts/admin-name.md', 'exploration/findings.md'.\n"
+                                 "- Do NOT just list memories. WRITE files. Use write-memory for every item you receive.\n\n"
+                                 "Existing memory index:\n" (or index-str "No memories stored"))}
                   {:role "user"
-                   :content (str "Items to file:\n\n" items-str)}]]
+                   :content (str "Write these items to memory:\n\n" items-str)}]]
     (let [results (run-scribe-turn cfg dir messages)]
       (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
       results)))
