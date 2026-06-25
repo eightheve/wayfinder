@@ -19,10 +19,10 @@
                         remembered? (assoc :remembered true))))
 
 (defn forget-item [ctx id]
-  (update-item ctx id {:salience :forgotten}))
+  (update ctx :items (fn [items] (filterv #(not= id (:id %)) items))))
 
 (defn needs-compact? [ctx threshold]
-  (> (count (:items ctx)) threshold))
+  (> (count (fetch-context ctx)) threshold))
 
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))

@@ -15,25 +15,29 @@
                         :reasoning {:effort (or reasoning-effort "medium")}
                         :messages messages}
                  (seq tools) (assoc :tools tools)))
+        _ (println (format "[llm] Sending: %d messages, %d chars" (count messages) (count body)))
+        start (System/currentTimeMillis)
         resp @(http/post url
                {:headers {"Content-Type" "application/json"
                           "Authorization" (str "Bearer " api-key)}
                 :body body
-                :timeout 120000})]
+                :timeout 120000})
+        elapsed (- (System/currentTimeMillis) start)]
     (if (:error resp)
       (do
-        (println (format "[llm] Request error: %s" (.getMessage (:error resp))))
+        (println (format "[llm] Request error after %d ms: %s" elapsed (.getMessage (:error resp))))
         (throw (ex-info (str "LLM request error: " (.getMessage (:error resp)))
                  {:error (:error resp)})))
-      (if (= 200 (:status resp))
-        (-> (:body resp)
-            (json/parse-string true)
-            :choices
-            first
-            :message)
-        (do
-          (println (format "[llm] Request failed: status %d, body: %s"
-                     (:status resp) (trunc (:body resp) 500)))
-          (throw (ex-info (str "LLM request failed: status " (:status resp))
-                   {:status (:status resp)
-                    :body (:body resp)})))))))
+      (do
+        (println (format "[llm] Response: status %d, %d ms" (:status resp) elapsed))
+        (if (= 200 (:status resp))
+          (-> (:body resp)
+              (json/parse-string true)
+              :choices
+              first
+              :message)
+          (do
+            (println (format "[llm] Request failed: body: %s" (trunc (:body resp) 500)))
+            (throw (ex-info (str "LLM request failed: status " (:status resp))
+                     {:status (:status resp)
+                      :body (:body resp)})))))))))

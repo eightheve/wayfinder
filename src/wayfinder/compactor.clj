@@ -78,7 +78,7 @@
     (file-to-scribe cfg (concat @to-remember @forgotten))))
 
 (defn compact [ctx cfg target]
-  (let [item-count (count (:items @ctx))
+  (let [item-count (count (context/fetch-context @ctx))
         context-str (format-context-for-compaction @ctx)]
     (println (format "[compactor] Running compaction (%d items, target %d)" item-count target))
     (let [messages [{:role "system"

@@ -102,7 +102,7 @@
         (try
           (locking monitor (.wait monitor delay))
           (catch InterruptedException _))
-        (let [item-count (count (:items @ctx))
+        (let [item-count (count (context/fetch-context @ctx))
               needs-compact (context/needs-compact? @ctx threshold)
               elapsed-since (- start @last-compact)
               can-compact (> elapsed-since cooldown-ms)]
