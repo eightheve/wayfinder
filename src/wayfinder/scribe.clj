@@ -53,7 +53,12 @@
       s)))
 
 (defn- extract-content [data]
-  (if (map? data) (:content data) (str data)))
+  (cond
+    (not (map? data)) (str data)
+    (:content data) (:content data)
+    (:action-type data) (let [params (dissoc (:params data) :call-id)]
+                          (format "%s %s" (name (:action-type data)) (pr-str params)))
+    :else (pr-str data)))
 
 (defn- format-item [item]
   (let [content (or (extract-content (:data item)) "(no content)")
