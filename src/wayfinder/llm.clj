@@ -8,11 +8,11 @@
       (str (subs s 0 max-len) "...")
       s)))
 
-(defn complete [base-url api-key model messages tools]
+(defn complete [base-url api-key model messages tools reasoning-effort]
   (let [url (str base-url "/chat/completions")
         body (json/generate-string
                (cond-> {:model model
-                        :reasoning {:effort "medium"}
+                        :reasoning {:effort (or reasoning-effort "medium")}
                         :messages messages}
                  (seq tools) (assoc :tools tools)))
         resp @(http/post url

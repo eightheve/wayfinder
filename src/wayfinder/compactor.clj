@@ -95,7 +95,7 @@
                     {:role "user"
                      :content context-str}]
           response (llm/complete (:base-url cfg) (:api-key cfg)
-                     (get-in cfg [:models :small]) messages tools/compactor-tool-definitions)]
+                     (get-in cfg [:models :small]) messages tools/compactor-tool-definitions "low")]
       (if-let [actions (seq (parse-compactor-calls response))]
         (do
           (println (format "[compactor] LLM returned %d actions" (count actions)))

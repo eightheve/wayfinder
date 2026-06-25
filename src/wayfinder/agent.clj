@@ -41,7 +41,7 @@
         api-key (:api-key cfg)
         model (get-in cfg [:models :small])]
     (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
-    (llm/complete base-url api-key model messages tools/tool-definitions)))
+    (llm/complete base-url api-key model messages tools/tool-definitions "high")))
 
 (defn execute-and-record [ctx cfg action]
   (let [{:keys [action-type params call-id]} action]

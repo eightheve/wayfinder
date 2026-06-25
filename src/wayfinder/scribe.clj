@@ -89,7 +89,7 @@
 
 (defn- run-scribe-turn [cfg dir messages]
   (let [response (llm/complete (:base-url cfg) (:api-key cfg)
-                   (get-in cfg [:models :small]) messages tools/scribe-tool-definitions)]
+                   (get-in cfg [:models :small]) messages tools/scribe-tool-definitions "low")]
     (if-let [actions (seq (parse-scribe-calls response))]
       (loop [actions actions results []]
         (if-let [action (first actions)]
