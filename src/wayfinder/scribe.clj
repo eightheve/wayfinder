@@ -93,8 +93,9 @@
       {:content "Unknown action"})))
 
 (defn- run-scribe-turn [cfg dir messages]
-  (let [response (llm/complete (:base-url cfg) (:api-key cfg)
-                   (get-in cfg [:models :small]) messages tools/scribe-tool-definitions "low")]
+  (let [agent-cfg (get-in cfg [:agents :scribe])
+        response (llm/complete (:base-url cfg) (:api-key cfg)
+                   (:model agent-cfg) messages tools/scribe-tool-definitions (:reasoning-effort agent-cfg))]
     (if-let [actions (seq (parse-scribe-calls response))]
       (do
         (println (format "[scribe] LLM returned %d actions: %s"

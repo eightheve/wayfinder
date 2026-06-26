@@ -39,9 +39,11 @@
   (let [messages (prompt/assemble @ctx system-prompt idle-count)
         base-url (:base-url cfg)
         api-key (:api-key cfg)
-        model (get-in cfg [:models :small])]
+        agent-cfg (get-in cfg [:agents :main])
+        model (:model agent-cfg)
+        effort (:reasoning-effort agent-cfg)]
     (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
-    (llm/complete base-url api-key model messages tools/tool-definitions "high")))
+    (llm/complete base-url api-key model messages tools/tool-definitions effort)))
 
 (defn execute-and-record [ctx cfg action]
   (let [{:keys [action-type params call-id]} action]

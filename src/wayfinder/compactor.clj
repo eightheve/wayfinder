@@ -94,8 +94,9 @@
                                    "- Batch your actions — issue multiple tool calls in a single response to compact efficiently.")}
                     {:role "user"
                      :content context-str}]
+          agent-cfg (get-in cfg [:agents :compactor])
           response (llm/complete (:base-url cfg) (:api-key cfg)
-                     (get-in cfg [:models :small]) messages tools/compactor-tool-definitions "low")]
+                     (:model agent-cfg) messages tools/compactor-tool-definitions (:reasoning-effort agent-cfg))]
       (if-let [actions (seq (parse-compactor-calls response))]
         (do
           (println (format "[compactor] LLM returned %d actions" (count actions)))
