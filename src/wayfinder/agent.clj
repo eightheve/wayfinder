@@ -84,17 +84,21 @@
           nil)))))
 
 (defn process-turn [ctx cfg system-prompt idle-count]
-  (let [response (call-llm ctx cfg system-prompt idle-count)]
-    (if-let [actions (seq (parse-tool-calls response))]
-      (loop [actions actions wait-info nil productive? false]
-        (if-let [action (first actions)]
-          (let [result (execute-and-record ctx cfg action)
-                productive? (or productive?
-                              (and (not= :wait (:action-type action))
-                                   (not= :reason (:action-type action))))]
-            (recur (rest actions) (or wait-info result) productive?))
+  (try
+    (let [response (call-llm ctx cfg system-prompt idle-count)]
+      (if-let [actions (seq (parse-tool-calls response))]
+        (loop [actions actions wait-info nil productive? false]
+          (if-let [action (first actions)]
+            (let [result (execute-and-record ctx cfg action)
+                  productive? (or productive?
+                                (and (not= :wait (:action-type action))
+                                     (not= :reason (:action-type action))))]
+              (recur (rest actions) (or wait-info result) productive?))
           {:delay (:delay wait-info) :productive? productive?}))
-      {:delay nil :productive? false})))
+      {:delay nil :productive? false}))
+    (catch Exception e
+      (println (format "[agent] Turn error: %s" (.getMessage e)))
+      {:delay default-delay :productive? false})))
 
 (defn start-message-watcher [ctx cfg monitor]
   (matrix/sync-loop ctx cfg monitor))
@@ -109,7 +113,7 @@
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
         last-compact (atom 0)
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
-        last-curate (atom 0)
+        last-curate (atom (System/currentTimeMillis))
         idle-count (atom 0)]
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds curate-interval=%ds"
@@ -141,10 +145,10 @@
               (try
                 (scribe/curate cfg)
                 (catch Exception e
-                  (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
+                  (println (format "[agent] Curation failed: %s" (.getMessage e))))))
           (let [next-result (process-turn ctx cfg system-prompt @idle-count)]
             (if (:productive? next-result)
               (reset! idle-count 0)
               (swap! idle-count inc))
             (dump-context ctx cfg)
-            (recur (or (:delay next-result) default-delay))))))))
+            (recur (or (:delay next-result) default-delay)))))))))
