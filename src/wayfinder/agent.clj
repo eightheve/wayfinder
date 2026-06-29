@@ -31,9 +31,12 @@
          :call-id (:id call)}))))
 
 (defn dump-context [ctx cfg]
-  (let [dir (str (or (:state-dir cfg) "/var/lib/wayfinder") "/debug")]
-    (.mkdirs (java.io.File. dir))
-    (spit (str dir "/context") (with-out-str (clojure.pprint/pprint @ctx)))))
+  (try
+    (let [dir (str (or (:state-dir cfg) "/var/lib/wayfinder") "/debug")]
+      (.mkdirs (java.io.File. dir))
+      (spit (str dir "/context") (with-out-str (clojure.pprint/pprint @ctx))))
+    (catch Exception e
+      (println (format "[agent] dump-context failed: %s" (.getMessage e))))))
 
 (defn call-llm [ctx cfg system-prompt idle-count]
   (let [messages (prompt/assemble @ctx system-prompt idle-count)
@@ -68,7 +71,9 @@
                            {:content "Memory recall initiated"})
 
                        (= action-type :curate-memories)
-                       (do (future (scribe/curate cfg))
+                       (do (future (try (scribe/curate cfg)
+                                    (catch Exception e
+                                      (println (format "[agent] Curation failed: %s" (.getMessage e))))))
                            {:content "Memory curation initiated"})
 
                        :else
@@ -111,7 +116,7 @@
         threshold (or (:compact-threshold cfg) 60)
         target (or (:compact-target cfg) 40)
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
-        last-compact (atom 0)
+        last-compact (atom (System/currentTimeMillis))
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
         last-curate (atom (System/currentTimeMillis))
         idle-count (atom 0)]
@@ -145,10 +150,10 @@
               (try
                 (scribe/curate cfg)
                 (catch Exception e
-                  (println (format "[agent] Curation failed: %s" (.getMessage e))))))
+                  (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
           (let [next-result (process-turn ctx cfg system-prompt @idle-count)]
             (if (:productive? next-result)
               (reset! idle-count 0)
               (swap! idle-count inc))
             (dump-context ctx cfg)
-            (recur (or (:delay next-result) default-delay)))))))))
+            (recur (or (:delay next-result) default-delay))))))))
