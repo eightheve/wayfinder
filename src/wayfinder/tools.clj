@@ -4,28 +4,31 @@
   [{:type "function"
     :function
     {:name "summarize-item"
-     :description "Replace an item's content with a shorter summary. Set remember=true to also file the original content to long-term memory before summarizing — use this for any item containing knowledge worth retaining indefinitely."
+     :description "Merge multiple items into one concise summary. The summary replaces the newest item in the batch; all others are forgotten. Set remember=true to file the original content of all items to long-term memory before summarizing."
      :parameters
      {:type "object"
       :properties
-      {:id {:type "integer"
-            :description "The ID of the item to summarize"}
+      {:ids {:type "array"
+             :items {:type "integer"}
+             :description "IDs of items to merge and summarize"}
        :summary {:type "string"
-                 :description "The shortened summary to replace the item's data"}
+                 :description "Consolidated summary replacing all listed items"}
        :remember {:type "boolean"
-                  :description "If true, file the item's original content to long-term memory before summarizing. Use for anything worth keeping indefinitely."}}
-      :required ["id" "summary"]}}}
+                  :description "If true, file original content of all items to long-term memory before summarizing. Use for knowledge worth keeping indefinitely."}}
+      :required ["ids" "summary"]}}}
 
    {:type "function"
     :function
     {:name "forget-item"
-     :description "Remove an item from context entirely. Items previously filed to long-term memory (remember=true on summarize) will not be re-filed when forgotten."
+     :description "Remove items from context entirely. Items previously filed to long-term memory (remember=true on summarize) will not be re-filed when forgotten."
      :parameters
      {:type "object"
       :properties
-      {:id {:type "integer"
-            :description "The ID of the item to forget"}}
-      :required ["id"]}}}
+      {:ids {:type "array"
+             :items {:type "integer"}
+             :description "IDs of items to forget"}}
+      :required ["ids"]}}}
+
    {:type "function"
     :function
     {:name "file-to-memory"
@@ -126,7 +129,7 @@
    {:type "function"
     :function
     {:name "shell-command"
-     :description "Execute a shell command and return its output"
+     :description "Execute a shell command and get its output"
      :parameters
      {:type "object"
       :properties
@@ -155,6 +158,14 @@
       {:query {:type "string"
                :description "What to search for in memory"}}
       :required ["query"]}}}
+
+   {:type "function"
+    :function
+    {:name "curate-memories"
+     :description "Request a memory curation pass. The scribe will review all stored memories, merge duplicates, consolidate overlapping files, and prune stale or low-quality entries."
+     :parameters
+     {:type "object"
+      :properties {}}}}
 
    {:type "function"
     :function

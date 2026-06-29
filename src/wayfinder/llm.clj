@@ -8,6 +8,30 @@
       (str (subs s 0 max-len) "...")
       s)))
 
+(defn embed [base-url api-key model text & [embeddings-base-url]]
+  (let [url (or embeddings-base-url (str base-url "/embeddings"))
+        body (json/generate-string {:model model :input text})
+        _ (println (format "[llm] Embedding: %d chars" (count text)))
+        start (System/currentTimeMillis)
+        resp @(http/post url
+               {:headers {"Content-Type" "application/json"
+                          "Authorization" (str "Bearer " api-key)}
+                :body body
+                :timeout 30000})
+        elapsed (- (System/currentTimeMillis) start)]
+    (if (:error resp)
+      (do
+        (println (format "[llm] Embedding error after %d ms: %s" elapsed (.getMessage (:error resp))))
+        nil)
+      (if (= 200 (:status resp))
+        (let [data (-> (:body resp) (json/parse-string true))
+              embedding (get-in data [:data 0 :embedding])]
+          (println (format "[llm] Embedding OK: %d dims, %d ms" (count embedding) elapsed))
+          embedding)
+        (do
+          (println (format "[llm] Embedding failed: status %d, body: %s" (:status resp) (trunc (:body resp) 500)))
+          nil)))))
+
 (defn complete [base-url api-key model messages tools reasoning-effort]
   (let [url (str base-url "/chat/completions")
         body (json/generate-string

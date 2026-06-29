@@ -14,12 +14,24 @@
                    item))
                (:items ctx))))
 
+(defn summarize-items [ctx ids data remembered?]
+  (let [last-id (apply max ids)
+        other-ids (remove #(= last-id %) ids)]
+    (-> ctx
+        (update :items (fn [items]
+                         (filterv #(not (contains? (set other-ids) (:id %))) items)))
+        (update-item last-id (cond-> {:salience :summarized :data data}
+                               remembered? (assoc :remembered true))))))
+
 (defn summarize-item [ctx id data remembered?]
-  (update-item ctx id (cond-> {:salience :summarized :data data}
-                        remembered? (assoc :remembered true))))
+  (summarize-items ctx [id] data remembered?))
+
+(defn forget-items [ctx ids]
+  (let [id-set (set ids)]
+    (update ctx :items (fn [items] (filterv #(not (contains? id-set (:id %))) items)))))
 
 (defn forget-item [ctx id]
-  (update ctx :items (fn [items] (filterv #(not= id (:id %)) items))))
+  (forget-items ctx [id]))
 
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))
@@ -29,3 +41,6 @@
 
 (defn fetch-id [ctx id]
   (filter #(= id (:id %)) (:items ctx)))
+
+(defn fetch-ids [ctx ids]
+  (filter #(contains? (set ids) (:id %)) (:items ctx)))

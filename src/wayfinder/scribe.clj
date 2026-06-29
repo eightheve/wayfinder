@@ -14,6 +14,11 @@
     (when-not (.exists f) (.mkdirs f))
     dir))
 
+(defn- embedding-config [cfg]
+  (let [embed-cfg (:embeddings cfg)]
+    {:model (:model embed-cfg)
+     :base-url (:embeddings-base-url cfg)}))
+
 (defn- scan-index [dir]
   (let [base (.toPath (File. dir))
         files (->> (file-seq (File. dir))
@@ -29,14 +34,36 @@
   (let [f (File. dir path)]
     (if (.exists f) (slurp f) "File not found")))
 
-(defn- write-memory-file [dir filename content]
+(defn- sidecar-path [md-path]
+  (let [base (if (.endsWith md-path ".md")
+               (subs md-path 0 (- (count md-path) 3))
+               md-path)]
+    (str base ".json")))
+
+(defn- write-embedding-sidecar [dir md-path content cfg]
+  (when-let [embed-model (:model (embedding-config cfg))]
+    (try
+      (let [embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model content
+                      (:embeddings-base-url (embedding-config cfg)))]
+        (when embedding
+          (let [sidecar (File. dir (sidecar-path md-path))
+                data (json/generate-string {:embedding embedding :summary (first (clojure.string/split-lines content))})]
+            (.mkdirs (.getParentFile sidecar))
+            (spit sidecar data))))
+      (catch Exception e
+        (println (format "[scribe] Embedding failed for %s: %s" md-path (.getMessage e)))))))
+
+(defn- write-memory-file [dir filename content cfg]
   (let [f (File. dir filename)]
     (.mkdirs (.getParentFile f))
-    (spit f content)))
+    (spit f content)
+    (write-embedding-sidecar dir filename content cfg)))
 
 (defn- delete-memory-file [dir path]
-  (let [f (File. dir path)]
-    (when (.exists f) (.delete f))))
+  (let [f (File. dir path)
+        sidecar (File. dir (sidecar-path path))]
+    (when (.exists f) (.delete f))
+    (when (.exists sidecar) (.delete sidecar))))
 
 (defn- parse-scribe-calls [response]
   (when-let [calls (:tool_calls response)]
@@ -69,7 +96,7 @@
       tag
       content)))
 
-(defn- execute-scribe-action [dir action]
+(defn- execute-scribe-action [dir cfg action]
   (let [{:keys [action-type params]} action]
     (case action-type
       :list-memories {:content (if-let [index (seq (scan-index dir))]
@@ -84,7 +111,7 @@
                       (println (format "[scribe] WRITE %s — %s"
                                  (:filename params)
                                  (trunc (get params :content "") 120)))
-                      {:content (do (write-memory-file dir (:filename params) (:content params))
+                      {:content (do (write-memory-file dir (:filename params) (:content params) cfg)
                                     "Memory written")})
       :delete-memory (do
                        (println (format "[scribe] DELETE %s" (:path params)))
@@ -103,7 +130,7 @@
                    (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
         (loop [actions actions results []]
           (if-let [action (first actions)]
-            (let [result (execute-scribe-action dir action)]
+            (let [result (execute-scribe-action dir cfg action)]
               (recur (rest actions) (conj results result)))
             results)))
       (do
@@ -140,24 +167,91 @@
       (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
       results)))
 
+;; --- Embedding-based recall ---
+
+(defn- load-embeddings [dir]
+  (let [base (.toPath (File. dir))
+        files (->> (file-seq (File. dir))
+                   (filter #(.isFile %))
+                   (filter #(re-find #"\.json$" (.getName %))))]
+    (for [f files]
+      (try
+        (let [rel (.toString (.relativize base (.toPath f)))
+              data (json/parse-string (slurp f) true)]
+          {:path rel
+           :embedding (:embedding data)
+           :summary (:summary data)})
+        (catch Exception e
+          (println (format "[scribe] Failed to load embedding %s: %s" (.getPath f) (.getMessage e)))
+          nil)))))
+
+(defn- dot-product [a b]
+  (reduce + (map * a b)))
+
+(defn- magnitude [v]
+  (Math/sqrt (dot-product v v)))
+
+(defn cosine-sim [a b]
+  (let [ma (magnitude a)
+        mb (magnitude b)]
+    (if (or (zero? ma) (zero? mb))
+      0.0
+      (/ (dot-product a b) (* ma mb)))))
+
 (defn recall [ctx cfg query]
   (println (format "[scribe] RECALL query: %s" (trunc query 100)))
+  (let [dir (ensure-dir (memory-dir cfg))
+        embed-cfg (embedding-config cfg)]
+    (if-let [embed-model (:model embed-cfg)]
+      (try
+        (let [query-embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model query
+                               (:embeddings-base-url embed-cfg))]
+          (when query-embedding
+            (let [stored (->> (load-embeddings dir) (remove nil?) vec)
+                  _ (println (format "[scribe] Comparing against %d stored embeddings" (count stored)))
+                  scored (->> stored
+                              (filter :embedding)
+                              (map (fn [{:keys [path embedding summary]}]
+                                     {:path path
+                                      :summary summary
+                                      :score (cosine-sim query-embedding embedding)}))
+                              (sort-by :score >)
+                              (take 5))
+                  _ (println (format "[scribe] Top results: %s"
+                              (->> scored (map #(format "%s (%.3f)" (:path %) (:score %))) (clojure.string/join ", "))))
+                  contents (doall (for [{:keys [path]} scored]
+                             (read-memory-file dir (str (.replaceAll path "\\.json$" ".md")))))]
+              (if (seq contents)
+                (let [content (clojure.string/join "\n\n" contents)]
+                  (println (format "[scribe] RECALL returned %d results, %d chars" (count contents) (count content)))
+                  (swap! ctx context/add-item :memory {:content content}))
+                (println "[scribe] RECALL: no embeddings found, no results")))))
+        (catch Exception e
+          (println (format "[scribe] RECALL embedding error: %s" (.getMessage e)))))
+      (println "[scribe] RECALL: no embedding model configured"))))
+
+;; --- Memory curation ---
+
+(defn curate [cfg]
+  (println "[scribe] CURATE: starting memory curation pass")
   (let [dir (ensure-dir (memory-dir cfg))
         index (scan-index dir)
         index-str (->> index
                        (map #(str (:path %) " — " (:summary %)))
                        (clojure.string/join "\n"))
         messages [{:role "system"
-                   :content (str "You are the Scribe, a memory retrieval agent. The main agent is asking to recall information. "
-                                 "Search the memory index for relevant files, read them, and return the relevant content. "
+                   :content (str "You are the Scribe performing memory curation. Your job is to review all stored memories and clean them up.\n\n"
+                                 "Guidelines:\n"
+                                 "- List all memories first, then read any you need to examine.\n"
+                                 "- MERGE: If two or more files cover the same topic or contain overlapping information, write a single consolidated file and delete the originals.\n"
+                                 "- DELETE: Remove files that contain no useful information (empty, trivial, redundant, or purely conversational with no factual content).\n"
+                                 "- PRUNE: If a file contains stale or outdated information alongside useful info, rewrite it with only current content and delete the old version.\n"
+                                 "- QUALITY: Every file should have a clear one-line summary as its first line. Rewrite files that lack this.\n"
+                                 "- Do NOT delete without reading. Do NOT merge without understanding the content.\n"
+                                 "- Be thorough but conservative. When in doubt, keep.\n\n"
                                  "Current memory index:\n" (or index-str "No memories stored"))}
                   {:role "user"
-                   :content (str "Recall query: " query)}]
-        results (run-scribe-turn cfg dir messages)]
-    (when (seq results)
-      (let [content (->> results
-                         (map :content)
-                         (remove #(= "No memories stored" %))
-                         (clojure.string/join "\n\n"))]
-        (println (format "[scribe] RECALL returned %d results, %d chars" (count results) (count content)))
-        (swap! ctx context/add-item :memory {:content content})))))
+                   :content "Review all memories and perform any needed curation."}]]
+    (let [results (run-scribe-turn cfg dir messages)]
+      (println (format "[scribe] CURATE: completed, %d actions executed" (count results)))
+      results)))

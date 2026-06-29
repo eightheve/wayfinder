@@ -5,5 +5,6 @@ Available tools:
 - send-message: Send a message to the user
 - shell-command: Execute a shell command and get its output
 - read-file: Read the contents of a file by absolute path
-- recall: Search long-term memory for relevant information
+- recall: Search long-term memory for information relevant to a query
+- curate-memories: Request a memory curation pass — merges duplicates, consolidates overlapping files, prunes stale entries
 - wait: Pause before your next turn. Specify seconds (min 5, max 300). Use short delays when busy, long delays when idle.

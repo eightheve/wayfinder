@@ -58,19 +58,27 @@
                   {:action-type action-type :params params :call-id call-id})
               action-id (dec (:next-id @ctx))
               _ (println (format "[agent] EXEC %s (item %d)" (name action-type) action-id))
-              result (if (= action-type :send-message)
+              result (cond
+                       (= action-type :send-message)
                        (do (matrix/send-message cfg (:content params))
                            {:content "Message sent"})
-                       (if (= action-type :recall)
-                         (do (scribe/recall ctx cfg (:query params))
-                             {:content "Memory recall initiated"})
-                         (try (dispatch/execute-action {:action-type action-type
+
+                       (= action-type :recall)
+                       (do (scribe/recall ctx cfg (:query params))
+                           {:content "Memory recall initiated"})
+
+                       (= action-type :curate-memories)
+                       (do (future (scribe/curate cfg))
+                           {:content "Memory curation initiated"})
+
+                       :else
+                       (try (dispatch/execute-action {:action-type action-type
                                                       :message-id (:message-id params)
                                                       :command (:command params)
                                                       :path (:path params)})
                             (catch Exception e
                               (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
-                              {:content (str "Error: " (.getMessage e))}))))
+                              {:content (str "Error: " (.getMessage e))})))
               _ (swap! ctx context/add-item :action-result
                   {:caused-by action-id :content (:content result)})]
           nil)))))
@@ -100,10 +108,12 @@
         target (or (:compact-target cfg) 40)
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
         last-compact (atom 0)
+        curate-interval (* (or (:curate-interval cfg) 1800) 1000)
+        last-curate (atom 0)
         idle-count (atom 0)]
     (start-message-watcher ctx cfg monitor)
-    (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds"
-               threshold target (or (:compact-cooldown cfg) 120)))
+    (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds curate-interval=%ds"
+               threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
     (loop [delay default-delay]
       (let [start (System/currentTimeMillis)]
         (try
@@ -111,8 +121,10 @@
           (catch InterruptedException _))
         (let [item-count (count (context/fetch-context @ctx))
               needs-compact (context/needs-compact? @ctx threshold)
-              elapsed-since (- start @last-compact)
-              can-compact (> elapsed-since cooldown-ms)]
+              elapsed-since-compact (- start @last-compact)
+              can-compact (> elapsed-since-compact cooldown-ms)
+              elapsed-since-curate (- start @last-curate)
+              can-curate (> elapsed-since-curate curate-interval)]
           (when (and needs-compact can-compact)
             (println (format "[agent] Context at %d items (threshold %d), triggering compaction"
                        item-count threshold))
@@ -121,6 +133,15 @@
               (compactor/compact ctx cfg target)
               (catch Exception e
                 (println (format "[agent] Compaction failed: %s" (.getMessage e))))))
+          (when can-curate
+            (println (format "[agent] %ds since last curation, triggering memory curation"
+                       (int (/ elapsed-since-curate 1000))))
+            (reset! last-curate start)
+            (future
+              (try
+                (scribe/curate cfg)
+                (catch Exception e
+                  (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
           (let [next-result (process-turn ctx cfg system-prompt @idle-count)]
             (if (:productive? next-result)
               (reset! idle-count 0)

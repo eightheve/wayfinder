@@ -47,13 +47,13 @@
   (cond
     (<= 3 idle-count 5)
     {:role "system"
-     :content "You've been idle for a while. You feel restless and want to investigate or learn something."}
+     :content "You've been idle for a while. That bothers you."}
     (<= 6 idle-count 8)
     {:role "system"
-     :content "You've been idle too long. You're uncomfortable doing nothing — go explore something, figure something out, follow up on an observation."}
+     :content "You've been idle too long. You're uncomfortable doing nothing."}
     (>= idle-count 9)
     {:role "system"
-     :content "Extended idleness. You need to do something. Find something to understand, investigate, or create."}
+     :content "Extended idleness. This isn't acceptable."}
     :else nil))
 
 (defn assemble [ctx system-prompt idle-count]
