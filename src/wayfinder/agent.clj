@@ -48,7 +48,21 @@
     (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
     (llm/complete base-url api-key model messages tools/tool-definitions effort)))
 
-(defn execute-and-record [ctx cfg action]
+(def ^:private max-result-length 10000)
+
+(defn- trunc-result [c]
+  (let [c (str c)]
+    (if (> (count c) max-result-length)
+      (str (subs c 0 max-result-length) "...")
+      c)))
+
+(defn- recent-result-contents [ctx n]
+  (->> (:items @ctx)
+       (filter #(= :action-result (:type %)))
+       (take-last n)
+       (map #(get-in % [:data :content]))))
+
+(defn execute-and-record [ctx cfg action recently-sent]
   (let [{:keys [action-type params call-id]} action]
     (if (= action-type :reason)
       (do (swap! ctx context/add-item :reasoning {:content (:thought params)})
@@ -63,8 +77,14 @@
               _ (println (format "[agent] EXEC %s (item %d)" (name action-type) action-id))
               result (cond
                        (= action-type :send-message)
-                       (do (matrix/send-message cfg (:content params))
-                           {:content "Message sent"})
+                       (let [content (:content params)]
+                         (if (some #(= content %) @recently-sent)
+                           (do (println "[agent] Skipping duplicate message")
+                               {:content "Duplicate message skipped"})
+                           (do (matrix/send-message cfg content)
+                               (swap! recently-sent conj content)
+                               (swap! recently-sent #(vec (take-last 10 %)))
+                               {:content "Message sent"})))
 
                        (= action-type :recall)
                        (do (scribe/recall ctx cfg (:query params))
@@ -84,17 +104,20 @@
                             (catch Exception e
                               (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
                               {:content (str "Error: " (.getMessage e))})))
-              _ (swap! ctx context/add-item :action-result
-                  {:caused-by action-id :content (:content result)})]
+              content (trunc-result (:content result))
+              duplicate? (some #(= content %) (recent-result-contents ctx 3))
+              _ (when-not duplicate?
+                  (swap! ctx context/add-item :action-result
+                    {:caused-by action-id :content content}))]
           nil)))))
 
-(defn process-turn [ctx cfg system-prompt idle-count]
+(defn process-turn [ctx cfg system-prompt idle-count recently-sent]
   (try
     (let [response (call-llm ctx cfg system-prompt idle-count)]
       (if-let [actions (seq (parse-tool-calls response))]
         (loop [actions actions wait-info nil productive? false]
           (if-let [action (first actions)]
-            (let [result (execute-and-record ctx cfg action)
+            (let [result (execute-and-record ctx cfg action recently-sent)
                   productive? (or productive?
                                 (and (not= :wait (:action-type action))
                                      (not= :reason (:action-type action))))]
@@ -119,7 +142,8 @@
         last-compact (atom (System/currentTimeMillis))
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
         last-curate (atom (System/currentTimeMillis))
-        idle-count (atom 0)]
+        idle-count (atom 0)
+        recently-sent (atom [])]
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds curate-interval=%ds"
                threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
@@ -151,7 +175,7 @@
                 (scribe/curate cfg)
                 (catch Exception e
                   (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
-          (let [next-result (process-turn ctx cfg system-prompt @idle-count)]
+          (let [next-result (process-turn ctx cfg system-prompt @idle-count recently-sent)]
             (if (:productive? next-result)
               (reset! idle-count 0)
               (swap! idle-count inc))

@@ -19,18 +19,24 @@
        (let [content (get-in item [:data :content])]
          (contains? low-value-results content))))
 
-(defn- pre-filter-context [ctx]
-  (let [items (context/fetch-context ctx)
+(defn prune-low-value [ctx]
+  (let [items (context/fetch-context @ctx)
         recent (take-last 20 items)
         recent-ids (set (map :id recent))
         older (remove #(contains? recent-ids (:id %)) items)
         [kept stripped] ((juxt filter remove) low-value? older)]
     (when (seq stripped)
-      (println (format "[compactor] Pre-filter removed %d low-value items" (count stripped))))
-    (concat kept recent)))
+      (let [breakdown (->> stripped
+                           (map #(get-in % [:data :content]))
+                           (frequencies)
+                           (map (fn [[k v]] (format "%dx \"%s\"" v (trunc k 60))))
+                           (clojure.string/join ", "))]
+        (println (format "[compactor] Pruned %d low-value items from context: %s"
+                   (count stripped) breakdown))
+        (swap! ctx context/forget-items (map :id stripped))))))
 
-(defn format-context-for-compaction [ctx]
-  (->> (pre-filter-context ctx)
+(defn- format-context-for-compaction [ctx]
+  (->> (context/fetch-context ctx)
        (take 100)
        (map (fn [item]
               (format "[%d] %s (%s) — %s"
@@ -98,6 +104,7 @@
     (file-to-scribe cfg (concat @to-remember @forgotten))))
 
 (defn compact [ctx cfg target]
+  (prune-low-value ctx)
   (let [item-count (count (context/fetch-context @ctx))
         context-str (format-context-for-compaction @ctx)]
     (println (format "[compactor] Running compaction (%d items, target %d)" item-count target))
@@ -107,6 +114,7 @@
                                    "Guidelines:\n"
                                    "- Prioritize compacting OLD items first — items with lower IDs are older and more likely to be summarizable.\n"
                                    "- Do NOT summarize or forget items from the last few turns (high IDs near " item-count "). The agent needs recent context to function.\n"
+                                   "- Cover MULTIPLE topics per pass. Scan the full list and act on items from different subjects — don't fixate on one cluster.\n"
                                    "- Use summarize-item with multiple IDs to merge related items into one summary. The summary replaces the newest item in the batch; all others are forgotten.\n"
                                    "- Set remember=true on summarize-item for any item containing knowledge worth retaining indefinitely (facts, configs, decisions, architecture). This files the original content to long-term memory before summarizing.\n"
                                    "- Use forget-item with multiple IDs to remove several trivial items at once.\n"

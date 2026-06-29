@@ -5,6 +5,8 @@
 
 (def pending-messages (atom {}))
 
+(def ^:private max-result-length 10000)
+
 (defn- trunc [s max-len]
   (let [s (str s)]
     (if (> (count s) max-len)
@@ -42,17 +44,18 @@
   (if (restricted-command? command)
     {:content "Access denied: that path is restricted."}
     (let [result (sh (System/getenv "SHELL_PATH") "-c" command)]
-      {:content (str (:out result)
-                (when (seq (:err result))
-                  (str "\n--- stderr ---\n" (:err result)))
-                (when (not= 0 (:exit result))
-                  (str "\n--- exit code " (:exit result) " ---")))})))
+      {:content (trunc (str (:out result)
+                        (when (seq (:err result))
+                          (str "\n--- stderr ---\n" (:err result)))
+                        (when (not= 0 (:exit result))
+                          (str "\n--- exit code " (:exit result) " ---")))
+                 max-result-length)})))
 
 (defmethod execute-action :read-file [{:keys [path]}]
   (if (restricted? path)
     {:content "Access denied: that path is restricted."}
     (if (.exists (File. path))
-      {:content (slurp path)}
+      {:content (trunc (slurp path) max-result-length)}
       {:content (str "File not found: " path)})))
 
 (defmethod execute-action :default [action]
