@@ -98,25 +98,6 @@
 
    {:type "function"
     :function
-    {:name "check-messages"
-     :description "Check if there are any unread messages. Returns list of pending message IDs with previews."
-     :parameters
-     {:type "object"
-      :properties {}}}}
-
-   {:type "function"
-    :function
-    {:name "view-message"
-     :description "View the full content of a pending message"
-     :parameters
-     {:type "object"
-      :properties
-      {:message-id {:type "integer"
-                    :description "The ID of the notification referencing this message"}}
-      :required ["message-id"]}}}
-
-   {:type "function"
-    :function
     {:name "send-message"
      :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. Say what you have to say in one message; they will reply when they reply. If you have more to add on the same topic, edit your thoughts before sending rather than sending a follow-up. Sending a second message that restates or continues what you just said is noise, not communication."
      :parameters

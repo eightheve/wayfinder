@@ -1,8 +1,7 @@
 (ns wayfinder.matrix
   (:require [org.httpkit.client :as http]
             [cheshire.core :as json]
-            [wayfinder.context :as context]
-            [wayfinder.dispatch :as dispatch]))
+            [wayfinder.context :as context]))
 
 (defn send-message [cfg content]
   (let [{:keys [homeserver access-token room-id]} (:matrix cfg)
@@ -41,11 +40,9 @@
                           messages (when since-token
                                     (filter #(message-event? % user-id) events))
                           _ (doseq [msg messages]
-                              (let [notif-id (:next-id @ctx)]
-                                (swap! dispatch/pending-messages assoc notif-id (:body (:content msg)))
-                                (swap! ctx context/add-item :notification
-                                  {:content (str "New message received (id: " notif-id ")")})
-                                (locking monitor (.notify monitor))))]
+                              (swap! ctx context/add-item :user-message
+                                {:content (:body (:content msg))})
+                              (locking monitor (.notify monitor)))]
                       (:next_batch body))
                     (do (Thread/sleep 5000) since-token)))
                 (catch Exception _

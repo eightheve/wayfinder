@@ -3,8 +3,6 @@
             [clojure.java.shell :refer [sh]])
   (:import [java.io File]))
 
-(def pending-messages (atom {}))
-
 (def ^:private max-result-length 10000)
 
 (defn- trunc [s max-len]
@@ -23,22 +21,6 @@
   (some #(re-find (re-pattern (java.util.regex.Pattern/quote %)) command) restricted-paths))
 
 (defmulti execute-action :action-type)
-
-(defmethod execute-action :check-messages [_]
-  (if-let [msgs (seq @pending-messages)]
-    {:content (->> msgs
-                   (map (fn [[id msg]] (format "id %d: %s" id (trunc msg 80))))
-                   (clojure.string/join "\n"))}
-    {:content "No unread messages."}))
-
-(defmethod execute-action :view-message [{:keys [message-id]}]
-  (if-let [msg (get @pending-messages message-id)]
-    (do (swap! pending-messages dissoc message-id)
-        {:content msg})
-    {:content (str "No pending message with id " message-id)}))
-
-(defmethod execute-action :send-message [{:keys [content]}]
-  {:content "Message sent"})
 
 (defmethod execute-action :shell-command [{:keys [command]}]
   (if (restricted-command? command)

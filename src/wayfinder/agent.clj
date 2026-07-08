@@ -64,70 +64,73 @@
 
 (defn execute-and-record [ctx cfg action recently-sent]
   (let [{:keys [action-type params call-id]} action]
-    (if (= action-type :reason)
+    (cond
+      (= action-type :reason)
       (do (swap! ctx context/add-item :reasoning {:content (:thought params)})
           nil)
-      (if (= action-type :wait)
-        (let [secs (max 5 (min 300 (:seconds params)))]
-          (println (format "[agent] WAIT %ds" secs))
-          {:delay (* secs 1000)})
-        (let [_ (swap! ctx context/add-item :action
+
+      (= action-type :wait)
+      (let [secs (max 5 (min 300 (:seconds params)))]
+        (println (format "[agent] WAIT %ds" secs))
+        {:delay (* secs 1000)})
+
+      (= action-type :send-message)
+      (let [content (:content params)]
+        (swap! ctx context/add-item :action {:action-type :send-message :params params :call-id call-id})
+        (println (format "[agent] EXEC send-message (item %d)" (dec (:next-id @ctx))))
+        (matrix/send-message cfg content)
+        (swap! recently-sent conj content)
+        (swap! recently-sent #(vec (take-last 10 %)))
+        nil)
+
+      :else
+      (let [_ (swap! ctx context/add-item :action
                   {:action-type action-type :params params :call-id call-id})
-              action-id (dec (:next-id @ctx))
-              _ (println (format "[agent] EXEC %s (item %d)" (name action-type) action-id))
-              result (cond
-                       (= action-type :send-message)
-                       (let [content (:content params)]
-                         (if (some #(= content %) @recently-sent)
-                           (do (println "[agent] Skipping duplicate message")
-                               {:content "Duplicate message skipped"})
-                           (do (matrix/send-message cfg content)
-                               (swap! recently-sent conj content)
-                               (swap! recently-sent #(vec (take-last 10 %)))
-                               {:content (str "Sent to user (they will read it when available): " content)})))
+            action-id (dec (:next-id @ctx))
+            _ (println (format "[agent] EXEC %s (item %d)" (name action-type) action-id))
+            result (cond
+                     (= action-type :recall)
+                     (do (scribe/recall ctx cfg (:query params))
+                         {:content "Memory recall initiated"})
 
-                       (= action-type :recall)
-                       (do (scribe/recall ctx cfg (:query params))
-                           {:content "Memory recall initiated"})
+                     (= action-type :list-memories)
+                     (do (println "[agent] LIST-MEMORIES")
+                         {:content (try (scribe/list-memories cfg)
+                                        (catch Exception e
+                                          (str "Error listing memories: " (.getMessage e))))})
 
-                       (= action-type :list-memories)
-                       (do (println "[agent] LIST-MEMORIES")
-                           {:content (try (scribe/list-memories cfg)
-                                          (catch Exception e
-                                            (str "Error listing memories: " (.getMessage e))))})
+                     (= action-type :pin-item)
+                     (let [id (:id params)]
+                       (swap! ctx context/update-item id {:pinned true})
+                       (println (format "[agent] PIN item %d" id))
+                       {:content (format "Pinned item %d" id)})
 
-                       (= action-type :pin-item)
-                       (let [id (:id params)]
-                         (swap! ctx context/update-item id {:pinned true})
-                         (println (format "[agent] PIN item %d" id))
-                         {:content (format "Pinned item %d" id)})
+                     (= action-type :unpin-item)
+                     (let [id (:id params)]
+                       (swap! ctx context/update-item id {:pinned false})
+                       (println (format "[agent] UNPIN item %d" id))
+                       {:content (format "Unpinned item %d" id)})
 
-                       (= action-type :unpin-item)
-                       (let [id (:id params)]
-                         (swap! ctx context/update-item id {:pinned false})
-                         (println (format "[agent] UNPIN item %d" id))
-                         {:content (format "Unpinned item %d" id)})
+                     (= action-type :curate-memories)
+                     (do (future (try (scribe/curate cfg)
+                                  (catch Exception e
+                                    (println (format "[agent] Curation failed: %s" (.getMessage e))))))
+                         {:content "Memory curation initiated"})
 
-                       (= action-type :curate-memories)
-                       (do (future (try (scribe/curate cfg)
-                                    (catch Exception e
-                                      (println (format "[agent] Curation failed: %s" (.getMessage e))))))
-                           {:content "Memory curation initiated"})
-
-                       :else
-                       (try (dispatch/execute-action {:action-type action-type
-                                                      :message-id (:message-id params)
-                                                      :command (:command params)
-                                                      :path (:path params)})
-                            (catch Exception e
-                              (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
-                              {:content (str "Error: " (.getMessage e))})))
-              content (trunc-result (:content result))
-              duplicate? (some #(= content %) (recent-result-contents ctx 3))
-              _ (when-not duplicate?
-                  (swap! ctx context/add-item :action-result
-                    {:caused-by action-id :content content}))]
-          nil)))))
+                     :else
+                     (try (dispatch/execute-action {:action-type action-type
+                                                    :message-id (:message-id params)
+                                                    :command (:command params)
+                                                    :path (:path params)})
+                          (catch Exception e
+                            (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
+                            {:content (str "Error: " (.getMessage e))})))
+            content (trunc-result (:content result))
+            duplicate? (some #(= content %) (recent-result-contents ctx 3))
+            _ (when-not duplicate?
+                (swap! ctx context/add-item :action-result
+                  {:caused-by action-id :content content}))]
+        nil))))
 
 (defn process-turn [ctx cfg system-prompt idle-count recently-sent]
   (try

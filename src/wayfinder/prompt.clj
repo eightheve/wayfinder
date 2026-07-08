@@ -3,15 +3,21 @@
             [cheshire.core :as json]))
 
 (defmulti render-item
-  (fn [item] (if (= :summarized (:salience item)) :summarized (:type item))))
+  (fn [item]
+    (if (= :summarized (:salience item))
+      :summarized
+      (if (and (= :action (:type item))
+               (= :send-message (get-in item [:data :action-type])))
+        :sent-message
+        (:type item)))))
 
 (defmethod render-item :summarized [item]
   {:role "user"
    :content (str "[context summary] " (:content (:data item)))})
 
-(defmethod render-item :notification [item]
-  {:role "user"
-   :content (str "[notification] " (:content (:data item)))})
+(defmethod render-item :sent-message [item]
+  {:role "assistant"
+   :content (get-in item [:data :params :content])})
 
 (defmethod render-item :user-message [item]
   {:role "user"
