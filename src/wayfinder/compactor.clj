@@ -92,9 +92,9 @@
 (defn- archive-items-for-actions! [ctx cfg actions prot-ids]
   (let [all-items (context/fetch-context @ctx)
         item-map (into {} (map (juxt :id identity) all-items))
-        ids-to-archive (-> (mapcat ids-to-forget-from-action actions)
-                           distinct
-                           (remove prot-ids))
+        ids-to-archive (->> (mapcat ids-to-forget-from-action actions)
+                            distinct
+                            (remove prot-ids))
         items-to-archive (keep item-map ids-to-archive)]
     (archive-verbatim! cfg items-to-archive)))
 
