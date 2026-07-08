@@ -161,11 +161,41 @@
 
    {:type "function"
     :function
+    {:name "list-memories"
+     :description "List all long-term memory files with their one-line summaries. Use this to see what knowledge you have stored, then use recall or read-file to access specific content."
+     :parameters
+     {:type "object"
+      :properties {}}}}
+
+   {:type "function"
+    :function
     {:name "curate-memories"
      :description "Request a memory curation pass. The scribe will review all stored memories, merge duplicates, consolidate overlapping files, and prune stale or low-quality entries."
      :parameters
      {:type "object"
       :properties {}}}}
+
+   {:type "function"
+    :function
+    {:name "pin-item"
+     :description "Pin a context item so the compactor cannot summarize or forget it. Use this for items that must stay in context verbatim — critical configs, active instructions, recent decisions you need to reference exactly."
+     :parameters
+     {:type "object"
+      :properties
+      {:id {:type "integer"
+            :description "The context item ID to pin"}}
+      :required ["id"]}}}
+
+   {:type "function"
+    :function
+    {:name "unpin-item"
+     :description "Remove the pin from a context item, allowing the compactor to summarize or forget it again."
+     :parameters
+     {:type "object"
+      :properties
+      {:id {:type "integer"
+            :description "The context item ID to unpin"}}
+      :required ["id"]}}}
 
    {:type "function"
     :function

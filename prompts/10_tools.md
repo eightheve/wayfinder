@@ -6,5 +6,8 @@ Available tools:
 - shell-command: Execute a shell command and get its output
 - read-file: Read the contents of a file by absolute path
 - recall: Search long-term memory for information relevant to a query
+- list-memories: List all long-term memory files with their one-line summaries
+- pin-item: Pin a context item so the compactor cannot summarize or forget it
+- unpin-item: Remove the pin from a context item
 - curate-memories: Request a memory curation pass — merges duplicates, consolidates overlapping files, prunes stale entries
 - wait: Pause before your next turn. Specify seconds (min 5, max 300). Use short delays when busy, long delays when idle.

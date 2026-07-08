@@ -90,6 +90,24 @@
                        (do (scribe/recall ctx cfg (:query params))
                            {:content "Memory recall initiated"})
 
+                       (= action-type :list-memories)
+                       (do (println "[agent] LIST-MEMORIES")
+                           {:content (try (scribe/list-memories cfg)
+                                          (catch Exception e
+                                            (str "Error listing memories: " (.getMessage e))))})
+
+                       (= action-type :pin-item)
+                       (let [id (:id params)]
+                         (swap! ctx context/update-item id {:pinned true})
+                         (println (format "[agent] PIN item %d" id))
+                         {:content (format "Pinned item %d" id)})
+
+                       (= action-type :unpin-item)
+                       (let [id (:id params)]
+                         (swap! ctx context/update-item id {:pinned false})
+                         (println (format "[agent] UNPIN item %d" id))
+                         {:content (format "Unpinned item %d" id)})
+
                        (= action-type :curate-memories)
                        (do (future (try (scribe/curate cfg)
                                     (catch Exception e
@@ -136,8 +154,8 @@
         ctx (atom {:items [] :next-id 0})
         system-prompt (load-system-prompt (or (:prompts-dir cfg) "prompts"))
         monitor (Object.)
-        threshold (or (:compact-threshold cfg) 60)
-        target (or (:compact-target cfg) 40)
+        threshold (or (:compact-threshold cfg) 8000)
+        target (or (:compact-target cfg) 5000)
         cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
         last-compact (atom (System/currentTimeMillis))
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
@@ -145,7 +163,7 @@
         idle-count (atom 0)
         recently-sent (atom [])]
     (start-message-watcher ctx cfg monitor)
-    (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d target=%d cooldown=%ds curate-interval=%ds"
+    (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d tokens target=%d tokens cooldown=%ds curate-interval=%ds"
                threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
     (loop [delay default-delay]
       (let [start (System/currentTimeMillis)]

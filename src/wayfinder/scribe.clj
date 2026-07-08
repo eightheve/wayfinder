@@ -19,11 +19,17 @@
     {:model (:model embed-cfg)
      :base-url (:embeddings-base-url cfg)}))
 
+(defn- in-reserved-dir? [dir f]
+  (let [abs (.getAbsolutePath f)]
+    (or (.startsWith abs (.getAbsolutePath (io/file dir "archive")))
+        (.startsWith abs (.getAbsolutePath (io/file dir "trash"))))))
+
 (defn- scan-index [dir]
   (let [base (.toPath (File. dir))
         files (->> (file-seq (File. dir))
                    (filter #(.isFile %))
-                   (remove #(re-find #"\.json$" (.getName %))))]
+                   (remove #(re-find #"\.json$" (.getName %)))
+                   (remove #(in-reserved-dir? dir %)))]
     (for [f files]
       (let [rel (.toString (.relativize base (.toPath f)))
             first-line (with-open [rdr (clojure.java.io/reader f)]
@@ -61,9 +67,17 @@
 
 (defn- delete-memory-file [dir path]
   (let [f (File. dir path)
-        sidecar (File. dir (sidecar-path path))]
-    (when (.exists f) (.delete f))
-    (when (.exists sidecar) (.delete sidecar))))
+        sidecar (File. dir (sidecar-path path))
+        trash-f (io/file dir "trash" path)
+        trash-sidecar (io/file dir "trash" (sidecar-path path))]
+    (when (.exists f)
+      (.mkdirs (.getParentFile trash-f))
+      (io/copy f trash-f)
+      (.delete f))
+    (when (.exists sidecar)
+      (.mkdirs (.getParentFile trash-sidecar))
+      (io/copy sidecar trash-sidecar)
+      (.delete sidecar))))
 
 (defn- parse-scribe-calls [response]
   (when-let [calls (:tool_calls response)]
@@ -167,13 +181,23 @@
       (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
       results)))
 
+(defn list-memories [cfg]
+  (let [dir (ensure-dir (memory-dir cfg))
+        index (scan-index dir)]
+    (if (seq index)
+      (->> index
+           (map #(str (:path %) " — " (:summary %)))
+           (clojure.string/join "\n"))
+      "No memories stored")))
+
 ;; --- Embedding-based recall ---
 
 (defn- load-embeddings [dir]
   (let [base (.toPath (File. dir))
         files (->> (file-seq (File. dir))
                    (filter #(.isFile %))
-                   (filter #(re-find #"\.json$" (.getName %))))]
+                   (filter #(re-find #"\.json$" (.getName %)))
+                   (remove #(in-reserved-dir? dir %)))]
     (for [f files]
       (try
         (let [rel (.toString (.relativize base (.toPath f)))

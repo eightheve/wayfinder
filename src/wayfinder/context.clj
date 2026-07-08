@@ -36,8 +36,11 @@
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))
 
+(defn token-estimate [items]
+  (quot (reduce + (map (comp count pr-str :data) items)) 4))
+
 (defn needs-compact? [ctx threshold]
-  (> (count (fetch-context ctx)) threshold))
+  (> (token-estimate (fetch-context ctx)) threshold))
 
 (defn fetch-id [ctx id]
   (filter #(= id (:id %)) (:items ctx)))
