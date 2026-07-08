@@ -84,7 +84,7 @@
                            (do (matrix/send-message cfg content)
                                (swap! recently-sent conj content)
                                (swap! recently-sent #(vec (take-last 10 %)))
-                               {:content "Message sent"})))
+                               {:content (str "Message sent to admin: " content)})))
 
                        (= action-type :recall)
                        (do (scribe/recall ctx cfg (:query params))
