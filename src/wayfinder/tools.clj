@@ -118,7 +118,7 @@
    {:type "function"
     :function
     {:name "send-message"
-     :description "Send a message to the user"
+     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. Say what you have to say in one message; they will reply when they reply. If you have more to add on the same topic, edit your thoughts before sending rather than sending a follow-up. Sending a second message that restates or continues what you just said is noise, not communication."
      :parameters
      {:type "object"
       :properties

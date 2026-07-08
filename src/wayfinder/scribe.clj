@@ -172,7 +172,7 @@
                                  "- Greetings, acknowledgments, \"message sent\" confirmations — still write these if they contain any factual content about the system or conversation.\n"
                                  "- Merge related items into one file. Write unrelated items to separate files.\n"
                                  "- First line of every file: a one-line summary.\n"
-                                 "- Filenames by topic: 'system/hostname.md', 'facts/admin-name.md', 'exploration/findings.md'.\n"
+                                 "- Filenames by topic: 'system/hostname.md', 'facts/user-name.md', 'exploration/findings.md'.\n"
                                  "- Do NOT just list memories. WRITE files. Use write-memory for every item you receive.\n\n"
                                  "Existing memory index:\n" (or index-str "No memories stored"))}
                   {:role "user"
