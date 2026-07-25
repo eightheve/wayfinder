@@ -87,6 +87,23 @@
                 SystemCallErrorNumber = "EPERM";
               };
             };
+
+            systemd.tmpfiles.rules = [
+              "d /srv/wayfinder 0755 ${cfg.user} ${cfg.user} -"
+              "d /srv/wayfinder/www 0755 ${cfg.user} ${cfg.user} -"
+            ];
+            services.nginx = {
+              enable = true;
+              virtualHosts."wayfinder.doppel.moe" = {
+                root = "/srv/wayfinder/www"; 
+                enableACME = true;
+                forceSSL = true;
+                locations."/" = {
+                  index = "index.html";
+                  tryFiles = "$uri $uri/ =404";
+                };
+              };
+            };
           };
         };
 
