@@ -8,7 +8,10 @@
             [wayfinder.scribe :as scribe]
             [wayfinder.matrix :as matrix]
             [cheshire.core :as json]
-            [clojure.pprint])
+            [clojure.edn]
+            [clojure.pprint]
+            [clojure.set]
+            [clojure.string])
   (:import [java.io File]))
 
 (def default-delay 5000)
@@ -30,6 +33,37 @@
                       (catch Exception _ {}))
          :call-id (:id call)}))))
 
+(defn- context-file [cfg]
+  (str (or (:state-dir cfg) "/var/lib/wayfinder") "/context.edn"))
+
+(defn save-context
+  "Persist live context after every turn (atomic write) so a restart
+   resurrects the session instead of rebooting an amnesiac."
+  [ctx cfg]
+  (try
+    (let [f (java.io.File. (context-file cfg))
+          tmp (java.io.File. (str (context-file cfg) ".tmp"))]
+      (.mkdirs (.getParentFile f))
+      (spit tmp (pr-str @ctx))
+      (.renameTo tmp f))
+    (catch Exception e
+      (println (format "[agent] save-context failed: %s" (.getMessage e))))))
+
+(defn load-context [cfg]
+  (try
+    (let [f (java.io.File. (context-file cfg))]
+      (when (.exists f)
+        (let [state (clojure.edn/read-string (slurp f))]
+          (if (and (map? state) (vector? (:items state)) (int? (:next-id state)))
+            (do (println (format "[agent] Resurrected context: %d items, next-id %d"
+                           (count (:items state)) (:next-id state)))
+                state)
+            (do (println "[agent] context.edn malformed — starting fresh")
+                nil)))))
+    (catch Exception e
+      (println (format "[agent] load-context failed (%s) — starting fresh" (.getMessage e)))
+      nil)))
+
 (defn dump-context [ctx cfg]
   (try
     (let [dir (str (or (:state-dir cfg) "/var/lib/wayfinder") "/debug")]
@@ -49,6 +83,20 @@
     (llm/complete base-url api-key model messages tools/tool-definitions effort)))
 
 (def ^:private max-result-length 10000)
+
+(defn- token-set [s]
+  (set (remove empty? (clojure.string/split (clojure.string/lower-case (str s)) #"[^\p{L}\p{N}]+"))))
+
+(defn- similarity
+  "Word-set Jaccard similarity, 0.0-1.0."
+  [a b]
+  (let [ta (token-set a) tb (token-set b)]
+    (if (or (empty? ta) (empty? tb))
+      0.0
+      (/ (double (count (clojure.set/intersection ta tb)))
+         (count (clojure.set/union ta tb))))))
+
+(def ^:private resend-similarity-threshold 0.6)
 
 (defn- trunc-result [c]
   (let [c (str c)]
@@ -75,18 +123,33 @@
         {:delay (* secs 1000)})
 
       (= action-type :send-message)
-      (let [content (:content params)]
-        (swap! ctx context/add-item :action {:action-type :send-message :params params :call-id call-id})
-        (println (format "[agent] EXEC send-message (item %d)" (dec (:next-id @ctx))))
-        (let [{:keys [ok? status]} (matrix/send-message cfg content)]
-          ;; success needs no extra item — the sent message renders in the
-          ;; transcript as assistant text, which is its own acknowledgment.
-          ;; Failure must be visible or the model believes it spoke.
-          (when-not ok?
-            (swap! ctx context/add-item :system-note
-              {:content (format "Message delivery FAILED (status %s). The user did NOT receive your last message." status)})))
-        (swap! recently-sent conj content)
-        (swap! recently-sent #(vec (take-last 10 %)))
+      (let [content (:content params)
+            _ (swap! ctx context/add-item :action {:action-type :send-message :params params :call-id call-id})
+            action-id (dec (:next-id @ctx))
+            near-dup (some #(when (> (similarity content %) resend-similarity-threshold) %)
+                       @recently-sent)]
+        (if near-dup
+          ;; Hard backstop against restatement sprees: recently-sent finally
+          ;; earns its keep. The rejection is reported as the tool result so
+          ;; the model learns why nothing was delivered.
+          (do
+            (println (format "[agent] send-message REJECTED as near-duplicate (item %d, similarity > %.1f)"
+                       action-id resend-similarity-threshold))
+            (swap! ctx context/add-item :action-result
+              {:caused-by action-id
+               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent."}))
+          (let [_ (println (format "[agent] EXEC send-message (item %d)" action-id))
+                {:keys [ok? status]} (matrix/send-message cfg content)]
+            ;; Send-message is bookkept like every other tool: the action
+            ;; renders as a tool_call and gets an explicit result, so the
+            ;; model has first-class evidence that it spoke (or failed to).
+            (swap! ctx context/add-item :action-result
+              {:caused-by action-id
+               :content (if ok?
+                          "Message delivered."
+                          (format "Delivery FAILED (status %s) — the user did NOT receive this message." status))})
+            (swap! recently-sent conj content)
+            (swap! recently-sent #(vec (take-last 10 %)))))
         nil)
 
       :else
@@ -171,7 +234,19 @@
 
 (defn run [cfg]
   (let [_ (System/setProperty "user.dir" (or (:home-dir cfg) "/home/wayfinder"))
-        ctx (atom {:items [] :next-id 0})
+        ctx (atom (or (load-context cfg) {:items [] :next-id 0}))
+        ;; On a genuinely fresh boot, orient the resident with its own
+        ;; long-term memory index so rebirth starts from what it knows,
+        ;; not from zero.
+        _ (when (empty? (:items @ctx))
+            (try
+              (let [index (scribe/list-memories cfg)]
+                (when (and index (not= index "No memories stored"))
+                  (swap! ctx context/add-item :memory
+                    {:content (str "Long-term memory index (from before this boot):\n" index)})
+                  (println "[agent] Fresh boot: injected long-term memory index")))
+              (catch Exception e
+                (println (format "[agent] memory orientation failed: %s" (.getMessage e))))))
         system-prompt (load-system-prompt (or (:prompts-dir cfg) "prompts"))
         monitor (Object.)
         threshold (or (:compact-threshold cfg) 8000)
@@ -217,5 +292,6 @@
             (if (:productive? next-result)
               (reset! idle-count 0)
               (swap! idle-count inc))
+            (save-context ctx cfg)
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))

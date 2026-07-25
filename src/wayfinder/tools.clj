@@ -99,7 +99,7 @@
    {:type "function"
     :function
     {:name "send-message"
-     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. Say what you have to say in one message; they will reply when they reply. If you have more to add on the same topic, edit your thoughts before sending rather than sending a follow-up. Sending a second message that restates or continues what you just said is noise, not communication."
+     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. The user keeps and sees EVERY message you have already sent: never restate, rephrase or resend earlier content, even with new details added. Send only when you have something genuinely new to say; learning more about a topic you already reported is not a reason to report it again. Silence is always acceptable."
      :parameters
      {:type "object"
       :properties

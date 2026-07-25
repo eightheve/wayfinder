@@ -2,22 +2,19 @@
   (:require [wayfinder.context :as context]
             [cheshire.core :as json]))
 
+;; NB: send-message actions used to render as plain assistant text
+;; (:sent-message special case). They now render as ordinary tool_calls with
+;; an explicit "Message delivered." result — first-class evidence of having
+;; spoken, at the cost of a slightly less chat-shaped transcript.
 (defmulti render-item
   (fn [item]
     (if (= :summarized (:salience item))
       :summarized
-      (if (and (= :action (:type item))
-               (= :send-message (get-in item [:data :action-type])))
-        :sent-message
-        (:type item)))))
+      (:type item))))
 
 (defmethod render-item :summarized [item]
   {:role "user"
    :content (str "[context summary] " (:content (:data item)))})
-
-(defmethod render-item :sent-message [item]
-  {:role "assistant"
-   :content (get-in item [:data :params :content])})
 
 (defmethod render-item :user-message [item]
   {:role "user"
