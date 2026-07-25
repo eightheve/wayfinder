@@ -5,13 +5,22 @@
 
 (defn send-message [cfg content]
   (let [{:keys [homeserver access-token room-id]} (:matrix cfg)
-        txn-id (str "wf_" (System/currentTimeMillis))
+        ;; millis alone can collide on back-to-back sends; Matrix silently
+        ;; dedups identical txn-ids, dropping the second message
+        txn-id (str "wf_" (System/currentTimeMillis) "_" (rand-int 1000000))
         url (str homeserver "/_matrix/client/v3/rooms/" room-id "/send/m.room.message/" txn-id)
-        body (json/generate-string {:msgtype "m.text" :body content})]
-    @(http/put url
-       {:headers {"Content-Type" "application/json"
-                  "Authorization" (str "Bearer " access-token)}
-        :body body})))
+        body (json/generate-string {:msgtype "m.text" :body content})
+        resp @(http/put url
+                {:headers {"Content-Type" "application/json"
+                           "Authorization" (str "Bearer " access-token)}
+                 :body body})]
+    (if (and (:status resp) (<= 200 (:status resp) 299))
+      {:ok? true :status (:status resp)}
+      (do
+        (println (format "[matrix] send-message FAILED: status %s%s"
+                   (:status resp)
+                   (if-let [e (:error resp)] (str " error " (.getMessage e)) "")))
+        {:ok? false :status (:status resp)}))))
 
 (defn- extract-room-events [sync-response room-id]
   (get-in sync-response [:rooms :join (keyword room-id) :timeline :events]))

@@ -45,6 +45,10 @@
   {:role "user"
    :content (str "[memory recall] " (:content (:data item)))})
 
+(defmethod render-item :system-note [item]
+  {:role "user"
+   :content (str "[system] " (:content (:data item)))})
+
 (defmethod render-item :default [item]
   {:role "user"
    :content (pr-str (:data item))})

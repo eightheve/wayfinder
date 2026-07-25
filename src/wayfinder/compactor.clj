@@ -26,16 +26,19 @@
         recent (take-last 20 items)
         recent-ids (set (map :id recent))
         older (remove #(contains? recent-ids (:id %)) items)
-        [kept stripped] ((juxt filter remove) low-value? older)]
-    (when (seq stripped)
-      (let [breakdown (->> stripped
+        ;; NB: (filter low-value?) selects the LOW-VALUE items — these are the
+        ;; ones to forget. The previous destructuring had the two halves
+        ;; swapped and deleted everything EXCEPT the boilerplate.
+        low-value (filter low-value? older)]
+    (when (seq low-value)
+      (let [breakdown (->> low-value
                            (map #(get-in % [:data :content]))
                            (frequencies)
                            (map (fn [[k v]] (format "%dx \"%s\"" v (trunc k 60))))
                            (clojure.string/join ", "))]
         (println (format "[compactor] Pruned %d low-value items from context: %s"
-                   (count stripped) breakdown))
-        (swap! ctx context/forget-items (map :id stripped))))))
+                   (count low-value) breakdown))
+        (swap! ctx context/forget-items-with-pairs (map :id low-value))))))
 
 (defn- protected-ids [items]
   (let [recent (set (map :id (take-last 20 items)))]
@@ -133,16 +136,18 @@
                     (do
                       (swap! forgotten conj item)
                       (println (format "[compactor] FORGET item %d" (:id item))))))
-                (swap! ctx context/forget-items ids))
+                (swap! ctx context/forget-items-with-pairs ids))
               (println (format "[compactor] Skipping forget-item — all of %s protected" (pr-str raw-ids))))
 
           :file-to-memory
           (let [id (:id params)
-                item (first (context/fetch-id @ctx id))
-                preview (trunc (pr-str (:data item)) 120)]
-            (swap! to-remember conj item)
-            (swap! ctx context/update-item id {:remembered true})
-            (println (format "[compactor] FILE-TO-MEMORY item %d: %s" id preview)))
+                item (first (context/fetch-id @ctx id))]
+            (if item
+              (let [preview (trunc (pr-str (:data item)) 120)]
+                (swap! to-remember conj item)
+                (swap! ctx context/update-item id {:remembered true})
+                (println (format "[compactor] FILE-TO-MEMORY item %d: %s" id preview)))
+              (println (format "[compactor] FILE-TO-MEMORY skipped — no item with id %s" (pr-str id)))))
 
           nil))
       (file-to-scribe cfg (concat @to-remember @forgotten)))))))

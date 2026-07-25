@@ -33,6 +33,26 @@
 (defn forget-item [ctx id]
   (forget-items ctx [id]))
 
+(defn expand-with-pairs
+  "Expand a set of ids to forget so action/action-result pairs live and die
+   together: a rendered transcript must never contain a tool_call without its
+   role:tool answer, nor an orphan tool answer."
+  [ctx ids]
+  (let [id-set (set ids)
+        items (:items ctx)
+        results-of-forgotten (->> items
+                                  (filter #(and (= :action-result (:type %))
+                                                (contains? id-set (get-in % [:data :caused-by]))))
+                                  (map :id))
+        actions-of-forgotten (->> items
+                                  (keep #(when (and (= :action-result (:type %))
+                                                    (contains? id-set (:id %)))
+                                           (get-in % [:data :caused-by]))))]
+    (into id-set (concat results-of-forgotten actions-of-forgotten))))
+
+(defn forget-items-with-pairs [ctx ids]
+  (forget-items ctx (expand-with-pairs ctx ids)))
+
 (defn fetch-context [ctx]
   (->> (:items ctx) (remove (comp #{:forgotten} :salience))))
 

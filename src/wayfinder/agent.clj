@@ -78,7 +78,13 @@
       (let [content (:content params)]
         (swap! ctx context/add-item :action {:action-type :send-message :params params :call-id call-id})
         (println (format "[agent] EXEC send-message (item %d)" (dec (:next-id @ctx))))
-        (matrix/send-message cfg content)
+        (let [{:keys [ok? status]} (matrix/send-message cfg content)]
+          ;; success needs no extra item — the sent message renders in the
+          ;; transcript as assistant text, which is its own acknowledgment.
+          ;; Failure must be visible or the model believes it spoke.
+          (when-not ok?
+            (swap! ctx context/add-item :system-note
+              {:content (format "Message delivery FAILED (status %s). The user did NOT receive your last message." status)})))
         (swap! recently-sent conj content)
         (swap! recently-sent #(vec (take-last 10 %)))
         nil)
