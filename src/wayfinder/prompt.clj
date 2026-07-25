@@ -50,17 +50,21 @@
   {:role "user"
    :content (pr-str (:data item))})
 
+;; Redesigned per the resident's own feedback (self-review Q7): the old ladder
+;; escalated discomfort ("this isn't acceptable"), which he rationally argued
+;; against rather than obeyed. Attentive waiting is now legitimate; the nudge
+;; guards against true drift, not against patience.
 (defn- nudge-for [idle-count]
   (cond
     (<= 3 idle-count 5)
     {:role "system"
-     :content "You've been idle for a while. That bothers you."}
+     :content "Several quiet turns. If you are waiting on something external, attentive waiting is a legitimate choice — consider a longer wait interval. If not, consider whether anything is genuinely worth initiating."}
     (<= 6 idle-count 8)
     {:role "system"
-     :content "You've been idle too long. You're uncomfortable doing nothing."}
+     :content "Still quiet. Check: is there an ongoing project, observation, or note worth advancing? If nothing needs you, a long deliberate wait is better than filler activity."}
     (>= idle-count 9)
     {:role "system"
-     :content "Extended idleness. This isn't acceptable."}
+     :content "Extended quiet. Review your goals and memory index — pick something meaningful, or settle into a long wait. Do not manufacture busywork."}
     :else nil))
 
 (defn assemble [ctx system-prompt idle-count]

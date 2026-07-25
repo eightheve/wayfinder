@@ -216,6 +216,46 @@
       (println (format "[scribe] REMEMBER wrote %s" filename))
       filename)))
 
+(defn append-note
+  "Append content to a memory file (creating it if absent) and refresh its
+   embedding sidecar. Cheap running-log primitive: no whole-file rewrite."
+  [cfg filename content]
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
+          filename (if (.endsWith filename ".md") filename (str filename ".md"))
+          f (File. dir filename)
+          existing (when (.exists f) (slurp f))
+          merged (if existing
+                   (str existing (when-not (.endsWith existing "\n") "\n") content "\n")
+                   (str content "\n"))]
+      (write-memory-file dir filename merged cfg)
+      (println (format "[scribe] APPEND %s (+%d chars)" filename (count content)))
+      filename)))
+
+(defn move-note
+  "Rename/move a memory file and its embedding sidecar."
+  [cfg from to]
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
+          from (if (.endsWith from ".md") from (str from ".md"))
+          to (if (.endsWith to ".md") to (str to ".md"))
+          src (File. dir from)
+          dst (File. dir to)
+          src-side (File. dir (sidecar-path from))
+          dst-side (File. dir (sidecar-path to))]
+      (if (.exists src)
+        (do
+          (.mkdirs (.getParentFile dst))
+          (io/copy src dst)
+          (.delete src)
+          (when (.exists src-side)
+            (.mkdirs (.getParentFile dst-side))
+            (io/copy src-side dst-side)
+            (.delete src-side))
+          (println (format "[scribe] MOVE %s -> %s" from to))
+          {:ok? true})
+        {:ok? false}))))
+
 (defn list-memories [cfg]
   (let [dir (ensure-dir (memory-dir cfg))
         index (scan-index dir)]

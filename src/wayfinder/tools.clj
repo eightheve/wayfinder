@@ -144,6 +144,32 @@
 
    {:type "function"
     :function
+    {:name "append-memory"
+     :description "Append content to an existing memory file (creates it if absent) without rewriting the whole file. Use for running logs and journals. The file's first line must remain a one-line summary."
+     :parameters
+     {:type "object"
+      :properties
+      {:filename {:type "string"
+                  :description "Memory file to append to, e.g. 'journal/2026-07.md'"}
+       :content {:type "string"
+                 :description "Content to append (a line or a paragraph)"}}
+      :required ["filename" "content"]}}}
+
+   {:type "function"
+    :function
+    {:name "move-memory"
+     :description "Rename or move a memory file (and its search index entry) to reorganize your knowledge tree, e.g. move 'facts/running-processes.md' to 'system/running-processes.md'."
+     :parameters
+     {:type "object"
+      :properties
+      {:from {:type "string"
+              :description "Current memory file path"}
+       :to {:type "string"
+            :description "New memory file path"}}
+      :required ["from" "to"]}}}
+
+   {:type "function"
+    :function
     {:name "recall"
      :description "Search long-term memory for information relevant to a query"
      :parameters

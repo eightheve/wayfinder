@@ -106,7 +106,9 @@
   (let [prot-ids (protected-ids (context/fetch-context @ctx))]
     (archive-items-for-actions! ctx cfg actions prot-ids)
     (let [forgotten (atom [])
-          to-remember (atom [])]
+          to-remember (atom [])
+          summarized-ids (atom 0)
+          summary-count (atom 0)]
       (doseq [{:keys [action-type params]} actions]
         (case action-type
           :summarize-item
@@ -122,6 +124,8 @@
                 (when-not remember?
                   (println (format "[compactor] SUMMARIZE items %s → %s"
                              (pr-str ids) (trunc (:summary params) 120))))
+                (swap! summarized-ids + (count ids))
+                (swap! summary-count inc)
                 (swap! ctx context/summarize-items ids {:content (:summary params)} remember?))
               (println (format "[compactor] Skipping summarize-item — all of %s protected" (pr-str raw-ids))))
 
@@ -150,6 +154,16 @@
               (println (format "[compactor] FILE-TO-MEMORY skipped — no item with id %s" (pr-str id)))))
 
           nil))
+      ;; Compaction transparency (requested by the resident, audit Q3):
+      ;; a compact in-context notice of what just changed, so pinning and
+      ;; re-ingestion stay possible. Non-intrusive: one line, opt-out by
+      ;; the compactor forgetting it later like any other item.
+      (let [n-forgot (count @forgotten)
+            n-filed (count @to-remember)]
+        (when (or (pos? @summary-count) (pos? n-forgot) (pos? n-filed))
+          (swap! ctx context/add-item :system-note
+            {:content (format "Context compacted: %d items merged into %d summaries, %d forgotten, %d filed to long-term memory. Pin anything you must keep verbatim."
+                        @summarized-ids @summary-count n-forgot n-filed)})))
       (file-to-scribe cfg (concat @to-remember @forgotten)))))))
 
 (defn compact [ctx cfg target]

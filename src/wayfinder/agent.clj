@@ -120,7 +120,9 @@
       (= action-type :wait)
       (let [secs (max 5 (min 300 (:seconds params)))]
         (println (format "[agent] WAIT %ds" secs))
-        {:delay (* secs 1000)})
+        ;; A long wait is a decision, not idleness: attentive waiting holds
+        ;; the idle counter instead of escalating it.
+        {:delay (* secs 1000) :deliberate-wait? (>= secs 60)})
 
       (= action-type :send-message)
       (let [content (:content params)
@@ -161,6 +163,24 @@
                      (= action-type :recall)
                      (do (scribe/recall ctx cfg (:query params))
                          {:content "Memory recall initiated"})
+
+                     (= action-type :append-memory)
+                     (do (println (format "[agent] APPEND-MEMORY %s" (:filename params)))
+                         {:content (try
+                                     (str "Appended to "
+                                       (scribe/append-note cfg (:filename params) (:content params)))
+                                     (catch Exception e
+                                       (str "Error appending: " (.getMessage e))))})
+
+                     (= action-type :move-memory)
+                     (do (println (format "[agent] MOVE-MEMORY %s -> %s" (:from params) (:to params)))
+                         {:content (try
+                                     (let [{:keys [ok?]} (scribe/move-note cfg (:from params) (:to params))]
+                                       (if ok?
+                                         (format "Moved %s to %s" (:from params) (:to params))
+                                         (format "Move failed: %s not found" (:from params))))
+                                     (catch Exception e
+                                       (str "Error moving: " (.getMessage e))))})
 
                      (= action-type :remember)
                      (do (println (format "[agent] REMEMBER %s" (:filename params)))
@@ -223,7 +243,9 @@
                                 (and (not= :wait (:action-type action))
                                      (not= :reason (:action-type action))))]
               (recur (rest actions) (or wait-info result) productive?))
-          {:delay (:delay wait-info) :productive? productive?}))
+          {:delay (:delay wait-info)
+           :productive? productive?
+           :waiting? (boolean (:deliberate-wait? wait-info))}))
       {:delay nil :productive? false}))
     (catch Exception e
       (println (format "[agent] Turn error: %s" (.getMessage e)))
@@ -289,9 +311,12 @@
                 (catch Exception e
                   (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
           (let [next-result (process-turn ctx cfg system-prompt @idle-count recently-sent)]
-            (if (:productive? next-result)
-              (reset! idle-count 0)
-              (swap! idle-count inc))
+            (cond
+              (:productive? next-result) (reset! idle-count 0)
+              ;; deliberate long wait: hold the counter — patience is a
+              ;; chosen state, not accumulating idleness
+              (:waiting? next-result) nil
+              :else (swap! idle-count inc))
             (save-context ctx cfg)
             (dump-context ctx cfg)
             (recur (or (:delay next-result) default-delay))))))))
