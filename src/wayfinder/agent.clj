@@ -55,9 +55,13 @@
       (when (.exists f)
         (let [state (clojure.edn/read-string (slurp f))]
           (if (and (map? state) (vector? (:items state)) (int? (:next-id state)))
-            (do (println (format "[agent] Resurrected context: %d items, next-id %d"
-                           (count (:items state)) (:next-id state)))
-                state)
+            ;; A context.edn written before the ledger existed resurrects with
+            ;; an empty done-list rather than nil — a reset costs the history,
+            ;; never the mechanism.
+            (let [state (update state :ledger #(if (vector? %) % []))]
+              (println (format "[agent] Resurrected context: %d items, next-id %d, %d ledger entries"
+                         (count (:items state)) (:next-id state) (count (:ledger state))))
+              state)
             (do (println "[agent] context.edn malformed — starting fresh")
                 nil)))))
     (catch Exception e
@@ -104,6 +108,17 @@
       (str (subs c 0 max-result-length) "...")
       c)))
 
+(defn- ledger-opts [cfg]
+  {:cap (or (:ledger-cap cfg) 30)
+   :arg-length (or (:ledger-arg-length cfg) 72)})
+
+(defn- result-ok?
+  "Coarse success signal for the ledger: every failure path in this file
+   reports itself by prefixing the result content."
+  [content]
+  (not (re-find #"(?i)^(error|access denied|move failed|delivery failed|send rejected|file not found)"
+         (str content))))
+
 (defn- recent-result-contents [ctx n]
   (->> (:items @ctx)
        (filter #(= :action-result (:type %)))
@@ -139,7 +154,10 @@
                        action-id resend-similarity-threshold))
             (swap! ctx context/add-item :action-result
               {:caused-by action-id
-               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."}))
+               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."})
+            ;; Ledger records attempts too: a rejected send did happen, and
+            ;; seeing it listed as FAILED is how the pattern becomes visible.
+            (swap! ctx context/record-action :send-message params false (ledger-opts cfg)))
           (let [_ (println (format "[agent] EXEC send-message (item %d)" action-id))
                 {:keys [ok? status]} (matrix/send-message cfg content)]
             ;; Send-message is bookkept like every other tool: the action
@@ -150,6 +168,7 @@
                :content (if ok?
                           "Message delivered."
                           (format "Delivery FAILED (status %s) — the user did NOT receive this message." status))})
+            (swap! ctx context/record-action :send-message params ok? (ledger-opts cfg))
             (swap! recently-sent conj content)
             (swap! recently-sent #(vec (take-last 10 %)))))
         nil)
@@ -229,7 +248,11 @@
             ;; message is rejected by OpenAI-compatible endpoints.
             _ (swap! ctx context/add-item :action-result
                 {:caused-by action-id
-                 :content (if duplicate? "(duplicate result suppressed)" content)})]
+                 :content (if duplicate? "(duplicate result suppressed)" content)})
+            ;; Every tool that produced a result lands in the done-list.
+            ;; reason and wait deliberately don't: the ledger answers "what
+            ;; have I already done", and thinking or waiting is not doing.
+            _ (swap! ctx context/record-action action-type params (result-ok? content) (ledger-opts cfg))]
         nil))))
 
 (defn process-turn [ctx cfg system-prompt idle-count recently-sent]
@@ -256,7 +279,7 @@
 
 (defn run [cfg]
   (let [_ (System/setProperty "user.dir" (or (:home-dir cfg) "/home/wayfinder"))
-        ctx (atom (or (load-context cfg) {:items [] :next-id 0}))
+        ctx (atom (or (load-context cfg) {:items [] :next-id 0 :ledger []}))
         ;; On a genuinely fresh boot, orient the resident with its own
         ;; long-term memory index so rebirth starts from what it knows,
         ;; not from zero.

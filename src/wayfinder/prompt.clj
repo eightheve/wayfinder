@@ -70,7 +70,12 @@
 (defn assemble [ctx system-prompt idle-count]
   (let [items (->> (context/fetch-context ctx)
                    (mapv render-item))
+        ;; The done-list rides outside the item stream (same family as the
+        ;; boot-time memory orientation): a fixed section rebuilt every turn,
+        ;; never subject to compaction.
+        ledger (context/render-ledger ctx)
         nudge (nudge-for idle-count)]
     (cond-> [{:role "system" :content system-prompt}]
       (seq items) (into items)
+      ledger (conj {:role "system" :content ledger})
       nudge (conj nudge))))
