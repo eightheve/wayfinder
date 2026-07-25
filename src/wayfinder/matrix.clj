@@ -1,7 +1,8 @@
 (ns wayfinder.matrix
   (:require [org.httpkit.client :as http]
             [cheshire.core :as json]
-            [wayfinder.context :as context]))
+            [wayfinder.context :as context]
+            [wayfinder.scribe :as scribe]))
 
 (defn send-message [cfg content]
   (let [{:keys [homeserver access-token room-id]} (:matrix cfg)
@@ -51,6 +52,11 @@
                           _ (doseq [msg messages]
                               (swap! ctx context/add-item :user-message
                                 {:content (:body (:content msg))})
+                              ;; Inline on purpose: the cue lands immediately
+                              ;; after the message that triggered it, before
+                              ;; the agent is woken, so it can never slip
+                              ;; between an action and its result.
+                              (scribe/cue-memories ctx cfg (:body (:content msg)))
                               (locking monitor (.notify monitor)))]
                       (:next_batch body))
                     (do (Thread/sleep 5000) since-token)))

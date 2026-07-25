@@ -42,6 +42,12 @@
   {:role "user"
    :content (str "[memory recall] " (:content (:data item)))})
 
+;; Cues carry their own in-band framing (⟪...⟫) — rendered bare so they read as
+;; something noticed, not as a system instruction.
+(defmethod render-item :memory-cue [item]
+  {:role "user"
+   :content (:content (:data item))})
+
 (defmethod render-item :system-note [item]
   {:role "user"
    :content (str "[system] " (:content (:data item)))})

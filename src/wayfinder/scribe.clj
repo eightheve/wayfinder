@@ -297,6 +297,19 @@
       0.0
       (/ (dot-product a b) (* ma mb)))))
 
+(defn- score-memories
+  "Score every stored sidecar against an embedding, best match first."
+  [dir embedding]
+  (let [stored (->> (load-embeddings dir) (remove nil?) vec)]
+    (println (format "[scribe] Comparing against %d stored embeddings" (count stored)))
+    (->> stored
+         (filter :embedding)
+         (map (fn [stored-memory]
+                {:path (:path stored-memory)
+                 :summary (:summary stored-memory)
+                 :score (cosine-sim embedding (:embedding stored-memory))}))
+         (sort-by :score >))))
+
 (defn recall [ctx cfg query]
   (println (format "[scribe] RECALL query: %s" (trunc query 100)))
   (let [dir (ensure-dir (memory-dir cfg))
@@ -306,16 +319,7 @@
         (let [query-embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model query
                                (:embeddings-base-url embed-cfg))]
           (when query-embedding
-            (let [stored (->> (load-embeddings dir) (remove nil?) vec)
-                  _ (println (format "[scribe] Comparing against %d stored embeddings" (count stored)))
-                  scored (->> stored
-                              (filter :embedding)
-                              (map (fn [{:keys [path embedding summary]}]
-                                     {:path path
-                                      :summary summary
-                                      :score (cosine-sim query-embedding embedding)}))
-                              (sort-by :score >)
-                              (take 5))
+            (let [scored (take 5 (score-memories dir query-embedding))
                   _ (println (format "[scribe] Top results: %s"
                               (->> scored (map #(format "%s (%.3f)" (:path %) (:score %))) (clojure.string/join ", "))))
                   contents (doall (for [{:keys [path]} scored]
@@ -328,6 +332,64 @@
         (catch Exception e
           (println (format "[scribe] RECALL embedding error: %s" (.getMessage e)))))
       (println "[scribe] RECALL: no embedding model configured"))))
+
+;; --- Passive recall cues ---
+;; recall is deliberate: it only fires when the agent already suspects it knows
+;; something. This is the involuntary counterpart — an incoming percept is
+;; embedded once and compared against the memory index, and a close match
+;; becomes an ordinary context item. No LLM call, no pinning, no priority: the
+;; cue is prunable and compactable like anything else, and can be ignored.
+
+(def ^:private default-cue-threshold 0.75)
+(def ^:private default-cue-max 2)
+(def ^:private default-cue-cooldown 50)
+
+(defn- cue-config [cfg]
+  {:enabled? (not (false? (:cues-enabled? cfg)))
+   :threshold (or (:cue-threshold cfg) default-cue-threshold)
+   :max-cues (or (:cue-max cfg) default-cue-max)
+   :cooldown (or (:cue-cooldown-items cfg) default-cue-cooldown)})
+
+(defn- cue-text [summary path]
+  (format "⟪memory cue: you have a memory that may relate — \"%s\" (%s). Recall it if useful; ignore if not.⟫"
+    (trunc (or summary "(no summary)") 200) path))
+
+(defn- cue-due?
+  "Cooldown, counted in context items rather than wall-clock: the same file is
+   not cued again until `cooldown` further items have accumulated, so one
+   recurring topic cannot keep re-announcing itself."
+  [ctx-val path cooldown]
+  (let [cued-at (get (:cue-log ctx-val) path)]
+    (or (nil? cued-at) (>= (- (:next-id ctx-val) cued-at) cooldown))))
+
+(defn cue-memories
+  "Embed a percept and, when a stored memory scores close enough, drop a short
+   cue into context. Best-effort by design: no embedding model, no match, or
+   any failure at all means one log line and nothing else — this path never
+   surfaces an error to the agent."
+  [ctx cfg text]
+  (let [{:keys [enabled? threshold max-cues cooldown]} (cue-config cfg)
+        embed-cfg (embedding-config cfg)
+        embed-model (:model embed-cfg)]
+    (when (and enabled? embed-model (seq (str text)))
+      (try
+        (let [dir (ensure-dir (memory-dir cfg))
+              embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model (str text)
+                          (:embeddings-base-url embed-cfg))]
+          (when embedding
+            (let [candidates (->> (score-memories dir embedding)
+                                  (filter #(>= (:score %) threshold))
+                                  (map #(assoc % :md-path (.replaceAll (str (:path %)) "\\.json$" ".md")))
+                                  (filter #(cue-due? @ctx (:md-path %) cooldown))
+                                  (take max-cues))]
+              (doseq [{:keys [md-path summary score]} candidates]
+                (println (format "[scribe] CUE %s (%.3f)" md-path score))
+                (swap! ctx (fn [c]
+                             (-> c
+                                 (context/add-item :memory-cue {:content (cue-text summary md-path)})
+                                 (assoc-in [:cue-log md-path] (:next-id c)))))))))
+        (catch Exception e
+          (println (format "[scribe] CUE skipped: %s" (.getMessage e))))))))
 
 ;; --- Memory curation ---
 
