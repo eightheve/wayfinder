@@ -13,7 +13,8 @@
       s)))
 
 (def ^:private low-value-results
-  #{"No unread messages." "Memory recall initiated" "Memory curation initiated"})
+  #{"No unread messages." "Memory recall initiated" "Memory curation initiated"
+    "(duplicate result suppressed)"})
 
 (defn- low-value? [item]
   (and (= :action-result (:type item))

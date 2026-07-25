@@ -9,6 +9,11 @@
 (defn- memory-dir [cfg]
   (or (:memory-dir cfg) "/var/lib/wayfinder/memory"))
 
+;; Compaction filing and timer-driven curation both run in futures and mutate
+;; the same memory directory; serialize all scribe passes so two LLM-driven
+;; passes can't interleave writes/deletes on the same files.
+(defonce ^:private scribe-io-lock (Object.))
+
 (defn- ensure-dir [dir]
   (let [f (File. dir)]
     (when-not (.exists f) (.mkdirs f))
@@ -133,23 +138,41 @@
                                      "Memory deleted")})
       {:content "Unknown action"})))
 
-(defn- run-scribe-turn [cfg dir messages]
-  (let [agent-cfg (get-in cfg [:agents :scribe])
-        response (llm/complete (:base-url cfg) (:api-key cfg)
-                   (:model agent-cfg) messages tools/scribe-tool-definitions (:reasoning-effort agent-cfg))]
-    (if-let [actions (seq (parse-scribe-calls response))]
-      (do
-        (println (format "[scribe] LLM returned %d actions: %s"
-                   (count actions)
-                   (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
-        (loop [actions actions results []]
-          (if-let [action (first actions)]
-            (let [result (execute-scribe-action dir cfg action)]
-              (recur (rest actions) (conj results result)))
-            results)))
-      (do
-        (println (format "[scribe] LLM returned no tool calls. Content: %s" (trunc (or (:content response) "(nil)") 200)))
-        []))))
+(def ^:private max-scribe-rounds 6)
+
+(defn- run-scribe-turn
+  "Multi-round tool loop: execute the scribe's tool calls, feed the results
+   back, and let it continue until it stops calling tools (or the round cap).
+   A single round is not enough for curation, whose prompt instructs
+   list -> read -> merge/write/delete."
+  [cfg dir messages]
+  (let [agent-cfg (get-in cfg [:agents :scribe])]
+    (loop [messages messages round 1 all-results []]
+      (let [response (llm/complete (:base-url cfg) (:api-key cfg)
+                       (:model agent-cfg) messages tools/scribe-tool-definitions (:reasoning-effort agent-cfg))
+            actions (seq (parse-scribe-calls response))]
+        (if-not actions
+          (do
+            (when (= round 1)
+              (println (format "[scribe] LLM returned no tool calls. Content: %s" (trunc (or (:content response) "(nil)") 200))))
+            all-results)
+          (let [_ (println (format "[scribe] round %d/%d: %d actions: %s"
+                             round max-scribe-rounds (count actions)
+                             (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
+                results (mapv #(execute-scribe-action dir cfg %) actions)]
+            (if (>= round max-scribe-rounds)
+              (do (println "[scribe] max rounds reached, stopping")
+                  (into all-results results))
+              (recur (-> messages
+                         (conj {:role "assistant" :content nil
+                                :tool_calls (:tool_calls response)})
+                         (into (map (fn [call result]
+                                      {:role "tool"
+                                       :tool_call_id (:id call)
+                                       :content (:content result)})
+                                    (:tool_calls response) results)))
+                     (inc round)
+                     (into all-results results)))))))))
 
 (defn file-memories [cfg items]
   (println (format "[scribe] file-memories called with %d items" (count items)))
@@ -158,7 +181,8 @@
                (:id item) (name (:type item))
                (if (:remembered item) "REMEMBER" "FORGET")
                (trunc (or (extract-content (:data item)) "(nil)") 100))))
-  (let [dir (ensure-dir (memory-dir cfg))
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
         items-str (->> items (map format-item) (clojure.string/join "\n"))
         index (scan-index dir)
         index-str (->> index
@@ -179,7 +203,18 @@
                    :content (str "Write these items to memory:\n\n" items-str)}]]
     (let [results (run-scribe-turn cfg dir messages)]
       (println (format "[scribe] file-memories completed, %d actions executed" (count results)))
-      results)))
+      results))))
+
+(defn remember-note
+  "Deterministic direct write from the main agent — no LLM round involved.
+   Writes the memory file and its embedding sidecar, returns the filename."
+  [cfg filename content]
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
+          filename (if (.endsWith filename ".md") filename (str filename ".md"))]
+      (write-memory-file dir filename content cfg)
+      (println (format "[scribe] REMEMBER wrote %s" filename))
+      filename)))
 
 (defn list-memories [cfg]
   (let [dir (ensure-dir (memory-dir cfg))
@@ -258,7 +293,8 @@
 
 (defn curate [cfg]
   (println "[scribe] CURATE: starting memory curation pass")
-  (let [dir (ensure-dir (memory-dir cfg))
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
         index (scan-index dir)
         index-str (->> index
                        (map #(str (:path %) " — " (:summary %)))
@@ -278,4 +314,4 @@
                    :content "Review all memories and perform any needed curation."}]]
     (let [results (run-scribe-turn cfg dir messages)]
       (println (format "[scribe] CURATE: completed, %d actions executed" (count results)))
-      results)))
+      results))))

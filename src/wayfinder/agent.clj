@@ -93,6 +93,14 @@
                      (do (scribe/recall ctx cfg (:query params))
                          {:content "Memory recall initiated"})
 
+                     (= action-type :remember)
+                     (do (println (format "[agent] REMEMBER %s" (:filename params)))
+                         {:content (try
+                                     (str "Memory written: "
+                                       (scribe/remember-note cfg (:filename params) (:content params)))
+                                     (catch Exception e
+                                       (str "Error writing memory: " (.getMessage e))))})
+
                      (= action-type :list-memories)
                      (do (println "[agent] LIST-MEMORIES")
                          {:content (try (scribe/list-memories cfg)
@@ -127,9 +135,12 @@
                             {:content (str "Error: " (.getMessage e))})))
             content (trunc-result (:content result))
             duplicate? (some #(= content %) (recent-result-contents ctx 3))
-            _ (when-not duplicate?
-                (swap! ctx context/add-item :action-result
-                  {:caused-by action-id :content content}))]
+            ;; Always record a result: prompt.clj renders every :action as an
+            ;; assistant tool_call, and a tool_call without a matching role:"tool"
+            ;; message is rejected by OpenAI-compatible endpoints.
+            _ (swap! ctx context/add-item :action-result
+                {:caused-by action-id
+                 :content (if duplicate? "(duplicate result suppressed)" content)})]
         nil))))
 
 (defn process-turn [ctx cfg system-prompt idle-count recently-sent]

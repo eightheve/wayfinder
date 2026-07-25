@@ -1,2 +1,5 @@
 wayfinder.edn
 .cpcache
+
+*.patch
+*.orig

@@ -131,6 +131,19 @@
 
    {:type "function"
     :function
+    {:name "remember"
+     :description "Write a note directly to your long-term memory. Use this whenever you learn something worth keeping: facts about the user, decisions, system knowledge, ongoing projects. The write is immediate and guaranteed — no intermediary."
+     :parameters
+     {:type "object"
+      :properties
+      {:filename {:type "string"
+                  :description "Topic path for the memory file, e.g. 'facts/user-name.md' or 'projects/garden.md'"}
+       :content {:type "string"
+                 :description "Full memory content. First line must be a one-line summary."}}
+      :required ["filename" "content"]}}}
+
+   {:type "function"
+    :function
     {:name "recall"
      :description "Search long-term memory for information relevant to a query"
      :parameters
