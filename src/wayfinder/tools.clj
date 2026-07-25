@@ -220,7 +220,7 @@
    {:type "function"
     :function
     {:name "wait"
-     :description "Pause before your next turn. Specify seconds (min 5, max 300). Use short delays when busy, long delays when idle."
+     :description "Pause before your next turn. Specify seconds (min 5, max 300)."
      :parameters
      {:type "object"
       :properties

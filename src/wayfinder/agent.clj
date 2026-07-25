@@ -139,7 +139,7 @@
                        action-id resend-similarity-threshold))
             (swap! ctx context/add-item :action-result
               {:caused-by action-id
-               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent."}))
+               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."}))
           (let [_ (println (format "[agent] EXEC send-message (item %d)" action-id))
                 {:keys [ok? status]} (matrix/send-message cfg content)]
             ;; Send-message is bookkept like every other tool: the action
