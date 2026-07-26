@@ -350,6 +350,12 @@
    :max-cues (or (:cue-max cfg) default-cue-max)
    :cooldown (or (:cue-cooldown-items cfg) default-cue-cooldown)})
 
+(def ^:private cue-stamp
+  (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss"))
+
+(defn- now-stamp []
+  (.format (java.time.LocalDateTime/now) cue-stamp))
+
 (defn- cue-text [summary path]
   (format "⟪memory cue: you have a memory that may relate — \"%s\" (%s). Recall it if useful; ignore if not.⟫"
     (trunc (or summary "(no summary)") 200) path))
@@ -377,17 +383,31 @@
               embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model (str text)
                           (:embeddings-base-url embed-cfg))]
           (when embedding
-            (let [candidates (->> (score-memories dir embedding)
+            (let [scored (score-memories dir embedding)
+                  candidates (->> scored
                                   (filter #(>= (:score %) threshold))
                                   (map #(assoc % :md-path (.replaceAll (str (:path %)) "\\.json$" ".md")))
                                   (filter #(cue-due? @ctx (:md-path %) cooldown))
                                   (take max-cues))]
+              ;; A cue that fires invisibly cannot be audited: score, memory and
+              ;; timestamp go both to the log and into the item's data, so a
+              ;; context dump answers "was that a cue?" on its own. Not a ledger
+              ;; entry — like reason and wait, being reminded of something is
+              ;; not doing something.
               (doseq [{:keys [md-path summary score]} candidates]
-                (println (format "[scribe] CUE %s (%.3f)" md-path score))
-                (swap! ctx (fn [c]
-                             (-> c
-                                 (context/add-item :memory-cue {:content (cue-text summary md-path)})
-                                 (assoc-in [:cue-log md-path] (:next-id c)))))))))
+                (let [at (now-stamp)]
+                  (println (format "[scribe] CUE FIRED %s memory=%s score=%.3f threshold=%.2f"
+                             at md-path score (double threshold)))
+                  (swap! ctx (fn [c]
+                               (-> c
+                                   (context/add-item :memory-cue {:content (cue-text summary md-path)
+                                                                  :memory md-path
+                                                                  :score score
+                                                                  :at at})
+                                   (assoc-in [:cue-log md-path] (:next-id c)))))))
+              (when (and (empty? candidates) (seq scored))
+                (println (format "[scribe] CUE none %s best=%s score=%.3f threshold=%.2f"
+                           (now-stamp) (:path (first scored)) (:score (first scored)) (double threshold)))))))
         (catch Exception e
           (println (format "[scribe] CUE skipped: %s" (.getMessage e))))))))
 

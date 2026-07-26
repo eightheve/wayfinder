@@ -119,6 +119,62 @@
   (not (re-find #"(?i)^(error|access denied|move failed|delivery failed|send rejected|file not found)"
          (str content))))
 
+;; --- Send gate ---
+;; The loop asks for an action every tick; "Message delivered." is not news,
+;; so a message answered only by its own receipt used to invite another
+;; message, and the agent ended up replying to itself. The gate holds a send
+;; when nothing has happened since the last one — softly, as an action-result,
+;; never as an error.
+
+(def ^:private delivery-receipt "Message delivered.")
+
+(defn- send-gate-enabled? [cfg]
+  (not (false? (:send-gate-enabled? cfg))))
+
+(defn- newsless-result?
+  "Bookkeeping chatter carries no information: a delivery receipt or a
+   suppressed duplicate is the loop talking to itself."
+  [content]
+  (let [c (clojure.string/trim (str content))]
+    (or (empty? c)
+        (= c delivery-receipt)
+        (= c "(duplicate result suppressed)"))))
+
+(defn- new-input-since?
+  "Did anything informative land after item `id`? A user message or a recall
+   result always counts; a tool result counts unless it is pure bookkeeping.
+   Memory cues deliberately don't: being reminded of something you already
+   know is not new input from the world."
+  [items id]
+  (boolean
+    (some (fn [item]
+            (case (:type item)
+              :user-message true
+              :memory true
+              :action-result (not (newsless-result? (get-in item [:data :content])))
+              false))
+      (filter #(> (:id %) id) items))))
+
+(defn- send-held?
+  "True when the last thing in context is this agent's own delivered message
+   and nothing has arrived since. Fails open: an unknown, failed or rejected
+   previous send holds nothing."
+  [ctx-val action-id]
+  (let [prior (filterv #(< (:id %) action-id) (:items ctx-val))
+        last-send (->> prior
+                       (filter #(and (= :action (:type %))
+                                     (= :send-message (get-in % [:data :action-type]))))
+                       last)
+        receipt (when last-send
+                  (->> prior
+                       (filter #(and (= :action-result (:type %))
+                                     (= (:id last-send) (get-in % [:data :caused-by]))))
+                       last))]
+    (boolean
+      (and receipt
+           (= delivery-receipt (clojure.string/trim (str (get-in receipt [:data :content]))))
+           (not (new-input-since? prior (:id last-send)))))))
+
 (defn- recent-result-contents [ctx n]
   (->> (:items @ctx)
        (filter #(= :action-result (:type %)))
@@ -129,15 +185,23 @@
   (let [{:keys [action-type params call-id]} action]
     (cond
       (= action-type :reason)
-      (do (swap! ctx context/add-item :reasoning {:content (:thought params)})
-          nil)
+      ;; Native reasoning is per-turn ephemeral: when the model calls reason
+      ;; without a thought, what lands in context is an empty husk (dump id
+      ;; 253: {:type :reasoning :data {:content nil}}) that renders as an
+      ;; assistant message with no content. Record thoughts, drop blanks.
+      (let [thought (:thought params)]
+        (if (clojure.string/blank? (str thought))
+          (println "[agent] REASON with empty content — not recorded")
+          (swap! ctx context/add-item :reasoning {:content thought}))
+        nil)
 
       (= action-type :wait)
       (let [secs (max 5 (min 300 (:seconds params)))]
         (println (format "[agent] WAIT %ds" secs))
-        ;; A long wait is a decision, not idleness: attentive waiting holds
-        ;; the idle counter instead of escalating it.
-        {:delay (* secs 1000) :deliberate-wait? (>= secs 60)})
+        ;; Waiting is a decision, not idleness — at any duration. Charging the
+        ;; idle counter for it made the cheapest legitimate turn the most
+        ;; expensive one, so the model paid the toll with filler instead.
+        {:delay (* secs 1000) :deliberate-wait? true})
 
       (= action-type :send-message)
       (let [content (:content params)
@@ -145,7 +209,8 @@
             action-id (dec (:next-id @ctx))
             near-dup (some #(when (> (similarity content %) resend-similarity-threshold) %)
                        @recently-sent)]
-        (if near-dup
+        (cond
+          near-dup
           ;; Hard backstop against restatement sprees: recently-sent finally
           ;; earns its keep. The rejection is reported as the tool result so
           ;; the model learns why nothing was delivered.
@@ -158,6 +223,18 @@
             ;; Ledger records attempts too: a rejected send did happen, and
             ;; seeing it listed as FAILED is how the pattern becomes visible.
             (swap! ctx context/record-action :send-message params false (ledger-opts cfg)))
+
+          (and (send-gate-enabled? cfg) (send-held? @ctx action-id))
+          ;; Softer than the duplicate rejection: the message may be perfectly
+          ;; good, it just has nothing to answer. Held, not refused.
+          (do
+            (println (format "[agent] send-message HELD (item %d): nothing new since the last delivered message" action-id))
+            (swap! ctx context/add-item :action-result
+              {:caused-by action-id
+               :content "No new input since your last message — hold, or record a note instead. (Message not sent.) Do not respond to this result, it is a purely internal one."})
+            (swap! ctx context/record-action :send-message params false (ledger-opts cfg)))
+
+          :else
           (let [_ (println (format "[agent] EXEC send-message (item %d)" action-id))
                 {:keys [ok? status]} (matrix/send-message cfg content)]
             ;; Send-message is bookkept like every other tool: the action

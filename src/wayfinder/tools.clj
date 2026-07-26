@@ -99,7 +99,7 @@
    {:type "function"
     :function
     {:name "send-message"
-     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. The user keeps and sees EVERY message you have already sent: never restate, rephrase or resend earlier content, even with new details added. Send only when you have something genuinely new to say; learning more about a topic you already reported is not a reason to report it again. Silence is always acceptable."
+     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. The user keeps and sees EVERY message you have already sent: never restate, rephrase or resend earlier content, even with new details added. Send only when you have something genuinely new to say; learning more about a topic you already reported is not a reason to report it again. If nothing has arrived since your last message — no reply, no new finding — there is nothing to send and the message will be held rather than delivered. Silence is always acceptable."
      :parameters
      {:type "object"
       :properties
@@ -220,7 +220,7 @@
    {:type "function"
     :function
     {:name "wait"
-     :description "Pause before your next turn. Specify seconds (min 5, max 300)."
+     :description "Pause before your next turn — a complete, legitimate turn of doing nothing. Specify seconds (min 5, max 300). When there is nothing worth doing, this is the action to take: it costs nothing and it is not idleness. Never fill a turn with a no-op command or an unnecessary message instead."
      :parameters
      {:type "object"
       :properties

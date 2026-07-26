@@ -14,4 +14,4 @@ Available tools:
 - pin-item: Pin a context item so the compactor cannot summarize or forget it
 - unpin-item: Remove the pin from a context item
 - curate-memories: Request a memory curation pass — merges duplicates, consolidates overlapping files, prunes stale entries
-- wait: Pause before your next turn. Specify seconds (min 5, max 300). Use short delays when busy, long delays when idle.
+- wait: Pause before your next turn. Specify seconds (min 5, max 300). Use short delays when busy, long delays when idle. Waiting is a first-class action and a complete turn — when nothing is worth doing, wait. Do not spend a turn on a no-op command (`echo idle`, `true`, `date`) or on a message you don't need to send just to have acted.

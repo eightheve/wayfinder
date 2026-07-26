@@ -1,6 +1,7 @@
 (ns wayfinder.prompt
   (:require [wayfinder.context :as context]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [clojure.string]))
 
 ;; NB: send-message actions used to render as plain assistant text
 ;; (:sent-message special case). They now render as ordinary tool_calls with
@@ -73,8 +74,18 @@
      :content "Extended quiet. Review your goals and memory index — pick something meaningful, or settle into a long wait. Do not manufacture busywork."}
     :else nil))
 
+(defn- reasoning-husk?
+  "A reasoning item whose content was lost. Contexts persisted before the
+   creation-side guard still carry these, and they render as an assistant
+   message with no content — dropped at render time rather than mutated."
+  [item]
+  (and (= :reasoning (:type item))
+       (not= :summarized (:salience item))
+       (clojure.string/blank? (str (:content (:data item))))))
+
 (defn assemble [ctx system-prompt idle-count]
   (let [items (->> (context/fetch-context ctx)
+                   (remove reasoning-husk?)
                    (mapv render-item))
         ;; The done-list rides outside the item stream (same family as the
         ;; boot-time memory orientation): a fixed section rebuilt every turn,
