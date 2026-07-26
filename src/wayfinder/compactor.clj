@@ -127,7 +127,7 @@
                 (swap! summarized-ids + (count ids))
                 (swap! summary-count inc)
                 (swap! ctx context/summarize-items ids {:content (:summary params)} remember?))
-              (println (format "[compactor] Skipping summarize-item — all of %s protected" (pr-str raw-ids))))
+              (println (format "[compactor] Skipping summarize-item — all of %s protected" (pr-str raw-ids)))))
 
           :forget-item
           (let [raw-ids (or (seq (:ids params)) (when-let [id (:id params)] [id]))
@@ -141,7 +141,7 @@
                       (swap! forgotten conj item)
                       (println (format "[compactor] FORGET item %d" (:id item))))))
                 (swap! ctx context/forget-items-with-pairs ids))
-              (println (format "[compactor] Skipping forget-item — all of %s protected" (pr-str raw-ids))))
+              (println (format "[compactor] Skipping forget-item — all of %s protected" (pr-str raw-ids)))))
 
           :file-to-memory
           (let [id (:id params)
@@ -153,7 +153,7 @@
                 (println (format "[compactor] FILE-TO-MEMORY item %d: %s" id preview)))
               (println (format "[compactor] FILE-TO-MEMORY skipped — no item with id %s" (pr-str id)))))
 
-          nil))
+          nil)
       ;; Compaction transparency (requested by the resident, audit Q3):
       ;; a compact in-context notice of what just changed, so pinning and
       ;; re-ingestion stay possible. Non-intrusive: one line, opt-out by
@@ -164,7 +164,7 @@
           (swap! ctx context/add-item :system-note
             {:content (format "Context compacted: %d items merged into %d summaries, %d forgotten, %d filed to long-term memory. Pin anything you must keep verbatim."
                         @summarized-ids @summary-count n-forgot n-filed)})))
-      (file-to-scribe cfg (concat @to-remember @forgotten)))))))
+      (file-to-scribe cfg (concat @to-remember @forgotten))))))
 
 (defn compact [ctx cfg target]
   (prune-low-value ctx)
