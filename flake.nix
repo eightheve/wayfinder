@@ -50,7 +50,15 @@
               after = [ "network-online.target" ];
               wants = [ "network-online.target" ];
 
-              path = [ pkgs.git pkgs.zsh pkgs.coreutils ];
+              path = [
+                pkgs.git
+                pkgs.zsh
+                pkgs.coreutils
+                pkgs.python3
+                pkgs.jq
+                pkgs.pandoc
+              ];
+
               environment = {
                 SHELL_PATH = "${pkgs.zsh}/bin/zsh";
                 WAYFINDER_CONFIG = cfg.configFile;
