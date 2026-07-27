@@ -42,6 +42,15 @@
               group = cfg.user;
               home = "/home/wayfinder";
               createHome = true;
+
+              packages = with pkgs; [
+                git
+                zsh
+                coreutils
+                python3
+                jq
+                pandoc
+              ];
             };
             users.groups.${cfg.user} = {};
 
@@ -54,9 +63,6 @@
                 pkgs.git
                 pkgs.zsh
                 pkgs.coreutils
-                pkgs.python3
-                pkgs.jq
-                pkgs.pandoc
               ];
 
               environment = {
