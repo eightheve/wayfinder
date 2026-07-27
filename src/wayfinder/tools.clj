@@ -220,7 +220,7 @@
    {:type "function"
     :function
     {:name "wait"
-     :description "Pause before your next turn — a complete, legitimate turn of doing nothing. Specify seconds (min 5, max 300). When there is nothing worth doing, this is the action to take: it costs nothing and it is not idleness. Never fill a turn with a no-op command or an unnecessary message instead."
+     :description "Pause before your next turn — a complete, legitimate turn of doing nothing. Specify seconds (min 5, max 300). When there is nothing worth doing, this is the action to take: it costs nothing and it is not idleness. Never fill a turn with a no-op command or an unnecessary message instead. Consecutive waits are folded into a single [idle] line in your context showing when the quiet started and how long it has really lasted — check it to know how long you have actually been waiting."
      :parameters
      {:type "object"
       :properties

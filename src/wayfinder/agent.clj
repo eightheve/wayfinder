@@ -382,12 +382,35 @@
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d tokens target=%d tokens cooldown=%ds curate-interval=%ds"
                threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
-    (loop [delay default-delay]
-      (let [start (System/currentTimeMillis)]
+    (loop [delay default-delay waited? false marker-id nil]
+      (let [start (System/currentTimeMillis)
+            pre-sleep-id (dec (:next-id @ctx))]
         (try
           (locking monitor (.wait monitor delay))
           (catch InterruptedException _))
-        (let [item-count (count (context/fetch-context @ctx))
+        ;; A deliberate wait leaves a running total, not a per-call log: fold
+        ;; this sleep's wall-clock time into the open wait-marker, or open one.
+        ;; Real elapsed, not requested seconds — an arriving message cuts the
+        ;; sleep short. A first wait cut short by input leaves no marker at
+        ;; all: it would render after the message that ended it and read as
+        ;; waiting that never happened.
+        (let [marker-id
+              (if-not waited?
+                marker-id
+                (let [now (System/currentTimeMillis)
+                      elapsed (- now start)
+                      live? (context/live-wait-marker? @ctx marker-id)
+                      interrupted? (new-input-since? (:items @ctx) pre-sleep-id)]
+                  (cond
+                    live? (do (swap! ctx context/accrue-wait marker-id elapsed)
+                              marker-id)
+                    interrupted? nil
+                    :else (do (swap! ctx context/add-item :wait-marker
+                                {:since-ms (- now elapsed)
+                                 :elapsed-ms elapsed
+                                 :waits 1})
+                              (dec (:next-id @ctx))))))
+              item-count (count (context/fetch-context @ctx))
               needs-compact (context/needs-compact? @ctx threshold)
               elapsed-since-compact (- start @last-compact)
               can-compact (> elapsed-since-compact cooldown-ms)
@@ -419,4 +442,13 @@
               :else (swap! idle-count inc))
             (save-context ctx cfg)
             (dump-context ctx cfg)
-            (recur (or (:delay next-result) default-delay))))))))
+            ;; The marker stays open only across an unbroken run of deliberate
+            ;; waits: a productive turn or fresh input ends the run, and the
+            ;; next wait opens a new marker (the old one stays as trace).
+            (recur (or (:delay next-result) default-delay)
+                   (boolean (:waiting? next-result))
+                   (when (and marker-id
+                              (:waiting? next-result)
+                              (not (:productive? next-result))
+                              (not (new-input-since? (:items @ctx) marker-id)))
+                     marker-id))))))))

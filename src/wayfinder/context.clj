@@ -69,6 +69,30 @@
 (defn fetch-ids [ctx ids]
   (filter #(contains? (set ids) (:id %)) (:items ctx)))
 
+;; --- Wait marker ---
+;; Consecutive deliberate waits fold into one running-total item instead of
+;; logging each call: the resident sees how long it has been idle without the
+;; transcript filling with wait/wait/wait.
+
+(defn live-wait-marker?
+  "Is `id` a wait-marker that still exists un-summarized? False for nil and
+   for markers the compactor has already touched."
+  [ctx id]
+  (boolean (some #(and (= id (:id %))
+                       (= :wait-marker (:type %))
+                       (= :raw (:salience %)))
+             (:items ctx))))
+
+(defn accrue-wait
+  "Fold elapsed milliseconds into wait-marker `id`. The caller guarantees the
+   marker is live (see live-wait-marker?)."
+  [ctx id elapsed-ms]
+  (let [item (first (fetch-id ctx id))]
+    (update-item ctx id
+      {:data (-> (:data item)
+                 (update :elapsed-ms + elapsed-ms)
+                 (update :waits inc))})))
+
 ;; --- Action ledger ---
 ;; An episodic done-list kept OUTSIDE the item stream: compaction, pruning and
 ;; summarization only ever touch :items, so this register survives them all.

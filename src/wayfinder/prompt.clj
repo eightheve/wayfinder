@@ -53,6 +53,31 @@
   {:role "user"
    :content (str "[system] " (:content (:data item)))})
 
+(def ^:private wait-marker-stamp
+  (java.time.format.DateTimeFormatter/ofPattern "HH:mm"))
+
+(defn- human-duration [ms]
+  (let [mins (quot ms 60000)
+        h (quot mins 60)
+        m (rem mins 60)]
+    (cond
+      (pos? h) (format "%dh%02dm" h m)
+      (pos? mins) (format "%dm" mins)
+      :else (format "%ds" (quot ms 1000)))))
+
+;; The running idle total: a run of deliberate waits renders as one line with
+;; real elapsed time, so the resident can tell twenty minutes from two without
+;; the transcript logging every wait call.
+(defmethod render-item :wait-marker [item]
+  (let [{:keys [since-ms elapsed-ms waits]} (:data item)
+        since (.format (java.time.LocalDateTime/ofInstant
+                         (java.time.Instant/ofEpochMilli since-ms)
+                         (java.time.ZoneId/systemDefault))
+                wait-marker-stamp)]
+    {:role "user"
+     :content (format "[idle] Waiting since %s — ~%s elapsed across %d wait%s, no external input in that time."
+                since (human-duration elapsed-ms) waits (if (= 1 waits) "" "s"))}))
+
 (defmethod render-item :default [item]
   {:role "user"
    :content (pr-str (:data item))})
