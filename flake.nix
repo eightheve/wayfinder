@@ -63,6 +63,10 @@
                 pkgs.git
                 pkgs.zsh
                 pkgs.coreutils
+                pkgs.nix
+                # kiwix-search: full-text search against the wikipedia zim
+                # mounted at /srv/wikipedia/latest.
+                pkgs.kiwix-tools
               ];
 
               environment = {
@@ -82,11 +86,23 @@
 
                 # Sandbox
                 ProtectSystem = "strict";
-                ReadWritePaths = [ cfg.stateDir "/home/wayfinder" "/srv/wayfinder" ];
+                ReadWritePaths = [
+                  cfg.stateDir
+                  "/home/wayfinder"
+                  "/srv/wayfinder"
+                  # The Nix daemon socket lives here; the nix client needs RW
+                  # to connect when wayfinder runs nix-shell / nix develop.
+                  "/nix/var/nix/daemon-socket"
+                ];
                 NoNewPrivileges = true;
                 PrivateTmp = true;
                 ProtectHome = "read-only";
-                RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
+                # AF_UNIX: required to reach the nix daemon socket.
+                RestrictAddressFamilies = [
+                  "AF_UNIX"
+                  "AF_INET"
+                  "AF_INET6"
+                ];
                 ProtectKernelTunables = true;
                 ProtectKernelModules = true;
                 ProtectClock = true;
