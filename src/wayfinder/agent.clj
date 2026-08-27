@@ -3,6 +3,7 @@
             [wayfinder.prompt :as prompt]
             [wayfinder.llm :as llm]
             [wayfinder.tools :as tools]
+            [wayfinder.custom-tools :as custom-tools]
             [wayfinder.dispatch :as dispatch]
             [wayfinder.compactor :as compactor]
             [wayfinder.scribe :as scribe]
@@ -84,7 +85,7 @@
         model (:model agent-cfg)
         effort (:reasoning-effort agent-cfg)]
     (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
-    (llm/complete base-url api-key model messages tools/tool-definitions effort)))
+    (llm/complete base-url api-key model messages (custom-tools/definitions) effort)))
 
 (def ^:private max-result-length 10000)
 
@@ -311,13 +312,15 @@
                          {:content "Memory curation initiated"})
 
                      :else
-                     (try (dispatch/execute-action {:action-type action-type
-                                                    :message-id (:message-id params)
-                                                    :command (:command params)
-                                                    :path (:path params)})
-                          (catch Exception e
-                            (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
-                            {:content (str "Error: " (.getMessage e))})))
+                     (if (custom-tools/exec-for action-type)
+                       (custom-tools/invoke action-type params)
+                       (try (dispatch/execute-action {:action-type action-type
+                                                      :message-id (:message-id params)
+                                                      :command (:command params)
+                                                      :path (:path params)})
+                            (catch Exception e
+                              (println (format "[agent] ERROR in %s: %s" (name action-type) (.getMessage e)))
+                              {:content (str "Error: " (.getMessage e))}))))
             content (trunc-result (:content result))
             duplicate? (some #(= content %) (recent-result-contents ctx 3))
             ;; Always record a result: prompt.clj renders every :action as an
@@ -378,7 +381,8 @@
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
         last-curate (atom (System/currentTimeMillis))
         idle-count (atom 0)
-        recently-sent (atom [])]
+        recently-sent (atom [])
+        _ (custom-tools/start! cfg)]
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d tokens target=%d tokens cooldown=%ds curate-interval=%ds"
                threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
@@ -433,6 +437,9 @@
                 (scribe/curate cfg)
                 (catch Exception e
                   (println (format "[agent] Curation failed: %s" (.getMessage e)))))))
+          (doseq [err (custom-tools/new-errors)]
+            (swap! ctx context/add-item :system-note
+              {:content (custom-tools/format-error err)}))
           (let [next-result (process-turn ctx cfg system-prompt @idle-count recently-sent)]
             (cond
               (:productive? next-result) (reset! idle-count 0)
