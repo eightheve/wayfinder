@@ -22,7 +22,8 @@
 (defn- embedding-config [cfg]
   (let [embed-cfg (:embeddings cfg)]
     {:model (:model embed-cfg)
-     :base-url (:embeddings-base-url cfg)}))
+     :base-url (:base-url embed-cfg)
+     :api-key (:api-key embed-cfg)}))
 
 (defn- in-reserved-dir? [dir f]
   (let [abs (.getAbsolutePath f)]
@@ -52,17 +53,17 @@
     (str base ".json")))
 
 (defn- write-embedding-sidecar [dir md-path content cfg]
-  (when-let [embed-model (:model (embedding-config cfg))]
-    (try
-      (let [embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model content
-                      (:embeddings-base-url (embedding-config cfg)))]
-        (when embedding
-          (let [sidecar (File. dir (sidecar-path md-path))
-                data (json/generate-string {:embedding embedding :summary (first (clojure.string/split-lines content))})]
-            (.mkdirs (.getParentFile sidecar))
-            (spit sidecar data))))
-      (catch Exception e
-        (println (format "[scribe] Embedding failed for %s: %s" md-path (.getMessage e)))))))
+  (let [embed-cfg (embedding-config cfg)]
+    (when-let [embed-model (:model embed-cfg)]
+      (try
+        (let [embedding (llm/embed (:base-url embed-cfg) (:api-key embed-cfg) embed-model content)]
+          (when embedding
+            (let [sidecar (File. dir (sidecar-path md-path))
+                  data (json/generate-string {:embedding embedding :summary (first (clojure.string/split-lines content))})]
+              (.mkdirs (.getParentFile sidecar))
+              (spit sidecar data))))
+        (catch Exception e
+          (println (format "[scribe] Embedding failed for %s: %s" md-path (.getMessage e))))))))
 
 (defn- write-memory-file [dir filename content cfg]
   (let [f (File. dir filename)]
@@ -148,7 +149,7 @@
   [cfg dir messages]
   (let [agent-cfg (get-in cfg [:agents :scribe])]
     (loop [messages messages round 1 all-results []]
-      (let [response (llm/complete (:base-url cfg) (:api-key cfg)
+      (let [response (llm/complete (:base-url agent-cfg) (:api-key agent-cfg)
                        (:model agent-cfg) messages tools/scribe-tool-definitions (:reasoning-effort agent-cfg))
             actions (seq (parse-scribe-calls response))]
         (if-not actions
@@ -316,8 +317,7 @@
         embed-cfg (embedding-config cfg)]
     (if-let [embed-model (:model embed-cfg)]
       (try
-        (let [query-embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model query
-                               (:embeddings-base-url embed-cfg))]
+        (let [query-embedding (llm/embed (:base-url embed-cfg) (:api-key embed-cfg) embed-model query)]
           (when query-embedding
             (let [scored (take 5 (score-memories dir query-embedding))
                   _ (println (format "[scribe] Top results: %s"
@@ -380,8 +380,7 @@
     (when (and enabled? embed-model (seq (str text)))
       (try
         (let [dir (ensure-dir (memory-dir cfg))
-              embedding (llm/embed (:base-url cfg) (:api-key cfg) embed-model (str text)
-                          (:embeddings-base-url embed-cfg))]
+              embedding (llm/embed (:base-url embed-cfg) (:api-key embed-cfg) embed-model (str text))]
           (when embedding
             (let [scored (score-memories dir embedding)
                   candidates (->> scored

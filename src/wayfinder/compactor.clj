@@ -188,7 +188,7 @@
                     {:role "user"
                      :content context-str}]
           agent-cfg (get-in cfg [:agents :compactor])
-          response (llm/complete (:base-url cfg) (:api-key cfg)
+          response (llm/complete (:base-url agent-cfg) (:api-key agent-cfg)
                      (:model agent-cfg) messages tools/compactor-tool-definitions (:reasoning-effort agent-cfg))]
       (if-let [actions (seq (parse-compactor-calls response))]
         (do

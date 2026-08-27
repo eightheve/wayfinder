@@ -8,8 +8,8 @@
       (str (subs s 0 max-len) "...")
       s)))
 
-(defn embed [base-url api-key model text & [embeddings-base-url]]
-  (let [url (or embeddings-base-url (str base-url "/embeddings"))
+(defn embed [base-url api-key model text]
+  (let [url (str base-url "/embeddings")
         body (json/generate-string {:model model :input text})
         _ (println (format "[llm] Embedding: %d chars" (count text)))
         start (System/currentTimeMillis)

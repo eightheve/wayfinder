@@ -78,9 +78,9 @@
 
 (defn call-llm [ctx cfg system-prompt idle-count]
   (let [messages (prompt/assemble @ctx system-prompt idle-count)
-        base-url (:base-url cfg)
-        api-key (:api-key cfg)
         agent-cfg (get-in cfg [:agents :main])
+        base-url (:base-url agent-cfg)
+        api-key (:api-key agent-cfg)
         model (:model agent-cfg)
         effort (:reasoning-effort agent-cfg)]
     (println (format "[agent] Calling LLM (%d items in context)" (count (:items @ctx))))
