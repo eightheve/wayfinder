@@ -60,6 +60,9 @@
               wants = [ "network-online.target" ];
 
               path = [
+                # Wayfinder's own scripts land in ~/bin so it can extend
+                # itself at runtime.
+                "/home/wayfinder/bin"
                 pkgs.git
                 pkgs.zsh
                 pkgs.coreutils
