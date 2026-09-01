@@ -139,7 +139,7 @@
                                      "Memory deleted")})
       {:content "Unknown action"})))
 
-(def ^:private max-scribe-rounds 6)
+(def ^:private max-scribe-rounds 12)
 
 (defn- run-scribe-turn
   "Multi-round tool loop: execute the scribe's tool calls, feed the results
