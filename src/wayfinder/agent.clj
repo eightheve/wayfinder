@@ -625,15 +625,15 @@
                                  :elapsed-ms elapsed
                                  :waits 1})
                               (dec (:next-id @ctx))))))
-              item-count (count (context/fetch-context @ctx))
+              token-count (context/token-estimate (context/fetch-context @ctx))
               needs-compact (context/needs-compact? @ctx threshold)
               elapsed-since-compact (- start @last-compact)
               can-compact (> elapsed-since-compact cooldown-ms)
               elapsed-since-curate (- start @last-curate)
               can-curate (> elapsed-since-curate curate-interval)]
           (when (and needs-compact can-compact)
-            (println (format "[agent] Context at %d items (threshold %d), triggering compaction"
-                       item-count threshold))
+            (println (format "[agent] Context at %d tokens (threshold %d), triggering compaction"
+                       token-count threshold))
             (reset! last-compact start)
             (try
               (compactor/compact ctx cfg target)
