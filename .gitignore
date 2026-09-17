@@ -3,4 +3,5 @@ wayfinder.edn
 
 *.patch
 *.orig
-.pi-subagents/
+
+.env
