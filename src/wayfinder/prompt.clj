@@ -82,6 +82,14 @@
   {:role "user"
    :content (pr-str (:data item))})
 
+;; The escalation texts live in one public map so other machinery can reuse
+;; the exact wording — Jev's drift score (agent.clj) picks a level directly,
+;; bypassing the idle-count ladder, and must not paraphrase the nudges.
+(def nudge-texts
+  {1 "Several quiet turns. If you are waiting on something external, attentive waiting is a legitimate choice — consider a longer wait interval. If not, consider whether anything is genuinely worth initiating."
+   2 "Still quiet. Check: is there an ongoing project, observation, or note worth advancing? If nothing needs you, a long deliberate wait is better than filler activity."
+   3 "Extended quiet. Review your goals and memory index — pick something meaningful, or settle into a long wait. Do not manufacture busywork."})
+
 ;; Redesigned per the resident's own feedback (self-review Q7): the old ladder
 ;; escalated discomfort ("this isn't acceptable"), which he rationally argued
 ;; against rather than obeyed. Attentive waiting is now legitimate; the nudge
@@ -90,13 +98,13 @@
   (cond
     (<= 3 idle-count 5)
     {:role "system"
-     :content "Several quiet turns. If you are waiting on something external, attentive waiting is a legitimate choice — consider a longer wait interval. If not, consider whether anything is genuinely worth initiating."}
+     :content (get nudge-texts 1)}
     (<= 6 idle-count 8)
     {:role "system"
-     :content "Still quiet. Check: is there an ongoing project, observation, or note worth advancing? If nothing needs you, a long deliberate wait is better than filler activity."}
+     :content (get nudge-texts 2)}
     (>= idle-count 9)
     {:role "system"
-     :content "Extended quiet. Review your goals and memory index — pick something meaningful, or settle into a long wait. Do not manufacture busywork."}
+     :content (get nudge-texts 3)}
     :else nil))
 
 (defn- reasoning-husk?
@@ -108,16 +116,27 @@
        (not= :summarized (:salience item))
        (clojure.string/blank? (str (:content (:data item))))))
 
-(defn assemble [ctx system-prompt idle-count]
-  (let [items (->> (context/fetch-context ctx)
-                   (remove reasoning-husk?)
-                   (mapv render-item))
-        ;; The done-list rides outside the item stream (same family as the
-        ;; boot-time memory orientation): a fixed section rebuilt every turn,
-        ;; never subject to compaction.
-        ledger (context/render-ledger ctx)
-        nudge (nudge-for idle-count)]
-    (cond-> [{:role "system" :content system-prompt}]
-      (seq items) (into items)
-      ledger (conj {:role "system" :content ledger})
-      nudge (conj nudge))))
+(defn assemble
+  "Builds the message list for one LLM call. The optional 4th arg is a
+   {:text ...} override that replaces the idle-count ladder: a map means take
+   its :text — and nil :text means NO nudge, even at high idle counts;
+   anything non-map falls back to the count ladder."
+  ([ctx system-prompt idle-count]
+   (assemble ctx system-prompt idle-count nil))
+  ([ctx system-prompt idle-count nudge-override]
+   (let [items (->> (context/fetch-context ctx)
+                    (remove reasoning-husk?)
+                    (mapv render-item))
+         ;; The done-list rides outside the item stream (same family as the
+         ;; boot-time memory orientation): a fixed section rebuilt every turn,
+         ;; never subject to compaction.
+         ledger (context/render-ledger ctx)
+         nudge (if (map? nudge-override)
+                 (:text nudge-override)
+                 (nudge-for idle-count))]
+     (cond-> [{:role "system" :content system-prompt}]
+       (seq items) (into items)
+       ledger (conj {:role "system" :content ledger})
+       nudge (conj (if (string? nudge)
+                     {:role "system" :content nudge}
+                     nudge))))))

@@ -7,6 +7,7 @@
             [wayfinder.dispatch :as dispatch]
             [wayfinder.compactor :as compactor]
             [wayfinder.scribe :as scribe]
+            [wayfinder.jev :as jev]
             [wayfinder.matrix :as matrix]
             [cheshire.core :as json]
             [clojure.edn]
@@ -77,8 +78,15 @@
     (catch Exception e
       (println (format "[agent] dump-context failed: %s" (.getMessage e))))))
 
+;; Forward reference: the drift nudge lives with the other Jev machinery
+;; below (it shares recent-context-lines), but call-llm above needs it first.
+(declare jev-nudge)
+
 (defn call-llm [ctx cfg system-prompt idle-count]
-  (let [messages (prompt/assemble @ctx system-prompt idle-count)
+  ;; Jev's drift score, when it has an opinion, replaces the bare idle-count
+  ;; nudge — judgment over arithmetic; the count ladder is the fallback when
+  ;; Jev has no opinion.
+  (let [messages (prompt/assemble @ctx system-prompt idle-count (jev-nudge ctx cfg idle-count))
         agent-cfg (get-in cfg [:agents :main])
         base-url (:base-url agent-cfg)
         api-key (:api-key agent-cfg)
@@ -182,6 +190,219 @@
        (take-last n)
        (map #(get-in % [:data :content]))))
 
+;; --- Jev send gate ---
+;; The old send gate was two brittle heuristics: Jaccard word-overlap for
+;; near-duplicate detection and a hard "nothing new arrived since your last
+;; message" rule for holding sends. Both decision types are exactly what Jev
+;; is for: one parallel call judges near-duplication against each recently
+;; sent message and newsworthiness against the recent context. Heuristics
+;; remain as the fallback when Jev is unreachable.
+
+(def ^:private send-gate-prior-send-candidates 5)
+
+(defn- recent-context-lines
+  "One line per informative recent context item, oldest first — the state the
+   send gate's newsworthiness judgment is made against."
+  [ctx-val n]
+  (->> (:items ctx-val)
+       (keep (fn [item]
+               (case (:type item)
+                 :user-message (str "[user] " (get-in item [:data :content]))
+                 :action-result (let [c (get-in item [:data :content])]
+                                  (when-not (newsless-result? c)
+                                    (str "[tool result|" (get-in item [:data :caused-by]) "] " (trunc-result c))))
+                 :memory (str "[memory recall] " (trunc-result (get-in item [:data :content])))
+                 :memory-cue (str "[memory cue] " (get-in item [:data :content]))
+                 :system-note (str "[system] " (get-in item [:data :content]))
+                 nil)))
+       (take-last n)
+       (clojure.string/join "\n")))
+
+(defn- jev-send-verdict
+  "One Jev call per candidate message: state carries recent context + the
+   messages already sent + the candidate; parallel nouls judge near-duplication
+   against each prior send and the message's newsworthiness. Returns
+   :send/:duplicate/:hold, or nil when Jev gives no opinion (caller uses
+   heuristics)."
+  [ctx cfg candidate-sends content]
+  (when (and (jev/available? cfg) (send-gate-enabled? cfg))
+    (let [priors (vec (take-last send-gate-prior-send-candidates candidate-sends))
+          dup-threshold (or (:jev-send-dup-threshold cfg) 0.6)
+          news-threshold (or (:jev-send-news-threshold cfg) 0.35)
+          prior-block (if (seq priors)
+                        (clojure.string/join "\n"
+                          (map-indexed (fn [i s] (format "PRIOR %d: %s" (inc i) s)) priors))
+                        "(none)")
+          state (str "RECENT CONTEXT (newest last):\n"
+                     (recent-context-lines @ctx 8)
+                     "\n\nMESSAGES ALREADY SENT (the user already has these):\n"
+                     prior-block
+                     "\n\nCANDIDATE MESSAGE (not yet sent):\n"
+                     content)
+          questions (cond-> {}
+                      :always
+                      (assoc "newsworthy"
+                             {:type "noul"
+                              :instructions (str "Does the candidate message contain something genuinely new for the user — "
+                                                 "a new finding, an answer to a recent user message, or information the "
+                                                 "user does not yet have from the recent context? A bare acknowledgment, a "
+                                                 "restate-what-I-just-said filler, or commentary with no new content is NO.")
+                              :criteria {"true" "Carries new information or answers something pending"
+                                         "false" "Nothing new: restatement, filler, or self-reply chatter"}})
+                      (seq priors)
+                      (into (map-indexed (fn [i _]
+                                           [(str "restate_" (inc i))
+                                            {:type "noul"
+                                             :instructions (str "Is the candidate message substantially a restatement, rephrasing, "
+                                                                "or re-answer of PRIOR " (inc i) "? The user already has PRIOR " (inc i)
+                                                                " — re-sending its substance, even with different words or small "
+                                                                "additions, is YES.")
+                                             :criteria {"true" "Substantially the same message"
+                                                        "false" "Genuinely different content"}}])
+                                         priors)))
+          result (jev/evaluate cfg state questions)
+          answers (:answers result)]
+      (when result
+        (let [dup-priors (->> (range 1 (inc (count priors)))
+                              (keep (fn [i] (jev/noul-of answers (str "restate_" i))))
+                              (seq))
+              max-dup (when dup-priors (apply max dup-priors))
+              news (jev/noul-of answers "newsworthy")]
+          (println (format "[agent] Jev send gate: %s%s"
+                     (if news (format "newsworthy=%.3f (hold below %.2f)" (double news) news-threshold) "newsworthy=n/a")
+                     (if max-dup (format " max-restatement=%.3f (reject above %.2f)" (double max-dup) dup-threshold) "")))
+          (cond
+            (and max-dup (>= max-dup dup-threshold)) :duplicate
+            (and news (< news news-threshold)) :hold
+            news :send
+            :else nil))))))
+
+;; --- Jev drift nudge ---
+;; The idle-count ladder is arithmetic: it escalates by count alone, whether
+;; the quiet is drift or a deliberately chosen wait. Jev reads the actual
+;; ledger and recent context and scores drift instead; the count ladder stays
+;; as the fallback for whenever Jev has no opinion.
+(defn- jev-nudge
+  "One Jev score question over the recent ledger + context: how drifted is
+   this agent? Returns {:text nudge-text-or-nil} to override the count
+   ladder, or nil when there is no opinion (Jev unavailable, failed, or no
+   score came back). A nil :text is itself an opinion — the quiet was judged
+   chosen, so no nudge fires even at high idle counts."
+  [ctx cfg idle-count]
+  (when (and (jev/available? cfg) (>= idle-count 3))
+    (try
+      (let [state (str "The agent has been quiet for " idle-count " turns.\n\n"
+                       "RECENT ACTIVITY LEDGER:\n"
+                       (or (context/render-ledger @ctx) "(nothing done yet)")
+                       "\n\nRECENT CONTEXT:\n"
+                       (recent-context-lines @ctx 10))
+            result (jev/evaluate cfg state
+                     {"drift"
+                      {:type "score"
+                       :instructions "How stuck is this agent, judging by its recent ledger and context? Purposely waiting for an external event or patiently working a long task is NOT stuck — that is chosen behavior. What matters is drift: filler actions, circular reasoning, or long purposeless quiet."
+                       :criteria ["Not stuck: productive, or deliberately and meaningfully waiting — needs nothing"
+                                  "Mildly drifting: quiet without clear purpose — a gentle check-in would help"
+                                  "Stuck: extended pointless cycling or purposeless silence — a strong nudge is warranted"]}})
+            score (:score (get (:answers result) "drift"))]
+        (cond
+          (nil? score) nil
+          (< score 0.75) {:text nil}
+          (< score 1.5) {:text (get prompt/nudge-texts 1)}
+          (< score 1.9) {:text (get prompt/nudge-texts 2)}
+          :else {:text (get prompt/nudge-texts 3)}))
+      (catch Exception e
+        (println (format "[agent] Jev drift nudge failed (%s) — count-ladder fallback" (.getMessage e)))
+        nil))))
+
+;; --- Send batch ---
+;; The gate judges per turn, not per bubble: a model that texts like a human
+;; may send several short bubbles in one turn, and judging each on its own
+;; would hold bubble #2+ as "nothing new since the last send". Multi-bubble
+;; texting is legitimate, but the anti-restatement protections must still
+;; fire — so all of a turn's sends are weighed as one combined message
+;; against ONE gate decision, then delivered bubble by bubble.
+(defn- execute-send-batch
+  [ctx cfg sends recently-sent]
+  (let [contents (mapv #(get-in % [:params :content]) sends)
+        combined (clojure.string/join "\n\n" contents)
+        ;; Fallback heuristics read the context BEFORE any batch item lands in
+        ;; it: next-id acts as the hypothetical first action id, so everything
+        ;; already in context is the untouched prior world the gate judges.
+        held? (and (send-gate-enabled? cfg)
+                   (send-held? @ctx (:next-id @ctx)))
+        ;; Jev decides duplication and newsworthiness in one call when
+        ;; available; the verdict nil hands off to the old heuristics.
+        jev-verdict (jev-send-verdict ctx cfg @recently-sent combined)
+        near-dup (when-not jev-verdict
+                   (some #(when (> (similarity combined %) resend-similarity-threshold) %)
+                     @recently-sent))
+        ;; Bookkeep every bubble as a first-class action before the verdict:
+        ;; each renders as its own tool_call, and whatever the gate decides,
+        ;; each gets its own matching result. Ids are the contiguous range
+        ;; (dec next-id) yields per add.
+        bubbles (loop [remaining sends acc []]
+                  (if-let [send (first remaining)]
+                    (do (swap! ctx context/add-item :action
+                          {:action-type :send-message :params (:params send) :call-id (:call-id send)})
+                        (recur (rest remaining)
+                               (conj acc [(dec (:next-id @ctx)) send])))
+                    acc))]
+    (cond
+      (or (= :duplicate jev-verdict) near-dup)
+      ;; Hard backstop against restatement sprees: recently-sent finally
+      ;; earns its keep. The rejection is reported as the tool result so
+      ;; the model learns why nothing was delivered. One verdict covers the
+      ;; whole batch, so every bubble is rejected.
+      (doseq [[action-id send] bubbles]
+        (println (format "[agent] send-message REJECTED as near-duplicate (item %d%s, %s)"
+                   action-id
+                   (if jev-verdict " via Jev" (format ", similarity > %.1f" resend-similarity-threshold))
+                   (if jev-verdict "probabilistic restatement" "Jaccard similarity")))
+        (swap! ctx context/add-item :action-result
+          {:caused-by action-id
+           :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."})
+        ;; Ledger records attempts too: a rejected send did happen, and
+        ;; seeing it listed as FAILED is how the pattern becomes visible.
+        (swap! ctx context/record-action :send-message (:params send) false (ledger-opts cfg)))
+
+      (or (= :hold jev-verdict) (and (not jev-verdict) held?))
+      ;; Softer than the duplicate rejection: the message may be perfectly
+      ;; good, it just has nothing to answer. Held, not refused.
+      (doseq [[action-id send] bubbles]
+        (println (format "[agent] send-message HELD (item %d): %s"
+                   action-id
+                   (if jev-verdict "Jev: nothing new to say" "nothing new since the last delivered message")))
+        (swap! ctx context/add-item :action-result
+          {:caused-by action-id
+           :content "No new input since your last message — hold, or record a note instead. (Message not sent.) Do not respond to this result, it is a purely internal one."})
+        (swap! ctx context/record-action :send-message (:params send) false (ledger-opts cfg)))
+
+      :else
+      ;; Deliver bubble by bubble, in order, with a beat between them: a
+      ;; human reads bubbles as they arrive — an instant triple-send looks
+      ;; robotic.
+      (doseq [[i [action-id send]] (map-indexed vector bubbles)]
+        (let [content (get-in send [:params :content])
+              _ (println (format "[agent] EXEC send-message (item %d)" action-id))
+              {:keys [ok? status]} (matrix/send-message cfg content)]
+          ;; Send-message is bookkept like every other tool: the action
+          ;; renders as a tool_call and gets an explicit result, so the
+          ;; model has first-class evidence that it spoke (or failed to).
+          (swap! ctx context/add-item :action-result
+            {:caused-by action-id
+             :content (if ok?
+                        "Message delivered."
+                        (format "Delivery FAILED (status %s) — the user did NOT receive this message." status))})
+          (swap! ctx context/record-action :send-message (:params send) ok? (ledger-opts cfg))
+          ;; Only delivered content feeds the near-dup gate: a failed send
+          ;; was never seen by the user, so retrying it must not read as a
+          ;; duplicate.
+          (when ok?
+            (swap! recently-sent conj content)
+            (swap! recently-sent #(vec (take-last 10 %))))
+          (when (< i (dec (count bubbles)))
+            (Thread/sleep 400)))))))
+
 (defn execute-and-record [ctx cfg action recently-sent]
   (let [{:keys [action-type params call-id]} action]
     (cond
@@ -205,50 +426,16 @@
         {:delay (* secs 1000) :deliberate-wait? true})
 
       (= action-type :send-message)
-      (let [content (:content params)
-            _ (swap! ctx context/add-item :action {:action-type :send-message :params params :call-id call-id})
-            action-id (dec (:next-id @ctx))
-            near-dup (some #(when (> (similarity content %) resend-similarity-threshold) %)
-                       @recently-sent)]
-        (cond
-          near-dup
-          ;; Hard backstop against restatement sprees: recently-sent finally
-          ;; earns its keep. The rejection is reported as the tool result so
-          ;; the model learns why nothing was delivered.
-          (do
-            (println (format "[agent] send-message REJECTED as near-duplicate (item %d, similarity > %.1f)"
-                       action-id resend-similarity-threshold))
-            (swap! ctx context/add-item :action-result
-              {:caused-by action-id
-               :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."})
-            ;; Ledger records attempts too: a rejected send did happen, and
-            ;; seeing it listed as FAILED is how the pattern becomes visible.
-            (swap! ctx context/record-action :send-message params false (ledger-opts cfg)))
-
-          (and (send-gate-enabled? cfg) (send-held? @ctx action-id))
-          ;; Softer than the duplicate rejection: the message may be perfectly
-          ;; good, it just has nothing to answer. Held, not refused.
-          (do
-            (println (format "[agent] send-message HELD (item %d): nothing new since the last delivered message" action-id))
-            (swap! ctx context/add-item :action-result
-              {:caused-by action-id
-               :content "No new input since your last message — hold, or record a note instead. (Message not sent.) Do not respond to this result, it is a purely internal one."})
-            (swap! ctx context/record-action :send-message params false (ledger-opts cfg)))
-
-          :else
-          (let [_ (println (format "[agent] EXEC send-message (item %d)" action-id))
-                {:keys [ok? status]} (matrix/send-message cfg content)]
-            ;; Send-message is bookkept like every other tool: the action
-            ;; renders as a tool_call and gets an explicit result, so the
-            ;; model has first-class evidence that it spoke (or failed to).
-            (swap! ctx context/add-item :action-result
-              {:caused-by action-id
-               :content (if ok?
-                          "Message delivered."
-                          (format "Delivery FAILED (status %s) — the user did NOT receive this message." status))})
-            (swap! ctx context/record-action :send-message params ok? (ledger-opts cfg))
-            (swap! recently-sent conj content)
-            (swap! recently-sent #(vec (take-last 10 %)))))
+      ;; Unreachable: process-turn routes every send through
+      ;; execute-send-batch. If this fires anyway, routing is broken —
+      ;; surface it loudly rather than silently dropping a user's message.
+      (do
+        (println "[agent] BUG: send-message reached execute-and-record — internal routing bug")
+        (swap! ctx context/add-item :action
+          {:action-type :send-message :params params :call-id call-id})
+        (swap! ctx context/add-item :action-result
+          {:caused-by (dec (:next-id @ctx))
+           :content "Error: send-message must go through the batch path — internal routing bug"})
         nil)
 
       :else
@@ -339,17 +526,28 @@
   (try
     (let [response (call-llm ctx cfg system-prompt idle-count)]
       (if-let [actions (seq (parse-tool-calls response))]
-        (loop [actions actions wait-info nil productive? false]
-          (if-let [action (first actions)]
-            (let [result (execute-and-record ctx cfg action recently-sent)
-                  productive? (or productive?
-                                (and (not= :wait (:action-type action))
-                                     (not= :reason (:action-type action))))]
-              (recur (rest actions) (or wait-info result) productive?))
-          {:delay (:delay wait-info)
-           :productive? productive?
-           :waiting? (boolean (:deliberate-wait? wait-info))}))
-      {:delay nil :productive? false}))
+        ;; All of a turn's sends form ONE batch judged by one gate decision
+        ;; (multi-bubble texting is legitimate; see execute-send-batch);
+        ;; everything else executes in its original order, exactly as before.
+        (let [{sends true others false}
+              (group-by #(= :send-message (:action-type %)) actions)]
+          (loop [actions others wait-info nil productive? false]
+            (if-let [action (first actions)]
+              (let [result (execute-and-record ctx cfg action recently-sent)
+                    productive? (or productive?
+                                  (and (not= :wait (:action-type action))
+                                       (not= :reason (:action-type action))))]
+                (recur (rest actions) (or wait-info result) productive?))
+              (do
+                ;; Sends go last, as one batch: the gate weighs their
+                ;; combined content against the context the other actions
+                ;; just produced.
+                (when (seq sends)
+                  (execute-send-batch ctx cfg sends recently-sent))
+                {:delay (:delay wait-info)
+                 :productive? (or productive? (boolean (seq sends)))
+                 :waiting? (boolean (:deliberate-wait? wait-info))}))))
+        {:delay nil :productive? false}))
     (catch Exception e
       (println (format "[agent] Turn error: %s" (.getMessage e)))
       {:delay default-delay :productive? false})))
