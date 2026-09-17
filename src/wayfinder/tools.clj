@@ -99,7 +99,7 @@
    {:type "function"
     :function
     {:name "send-message"
-     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. The user keeps and sees EVERY message you have already sent: never restate, rephrase or resend earlier content, even with new details added. Send only when you have something genuinely new to say; learning more about a topic you already reported is not a reason to report it again. If nothing has arrived since your last message — no reply, no new finding — there is nothing to send and the message will be held rather than delivered. Silence is always acceptable."
+     :description "Send a message to the user you live with. Delivery is asynchronous — they read it when they are available, not instantly. The user keeps and sees EVERY message you have already sent: never restate, rephrase or resend earlier content, even with new details added. Send only when you have something genuinely new to say; learning more about a topic you already reported is not a reason to report it again. If nothing has arrived since your last message — no reply, no new finding — there is nothing to send and the message will be held rather than delivered. Silence is always acceptable. You may call this several times in one turn — each call is one separate chat bubble, and bubbles from the same turn are delivered together. Prefer several short bubbles over one long report."
      :parameters
      {:type "object"
       :properties
