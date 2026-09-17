@@ -1,0 +1,80 @@
+;; Wayfinder configuration example.
+;; Copy this file to wayfinder.edn and fill in the real values.
+;;
+;; Every model below carries its own :base-url and :api-key. There is no
+;; universal top-level :base-url or :api-key.
+
+{:agents
+ ;; Main resident agent
+ {:main
+  {:model "syn:large:text"
+   :reasoning-effort "medium"
+   :base-url "https://api.synthetic.new/openai/v1"
+   :api-key "REPLACE_MAIN_API_KEY"}
+
+  ;; Scribe: writes and curates long-term memory
+  :scribe
+  {:model "syn:small:text"
+   :reasoning-effort "low"
+   :base-url "https://api.synthetic.new/openai/v1"
+   :api-key "REPLACE_SCRIBE_API_KEY"}
+
+  ;; Compactor: summarizes and forgets context
+  :compactor
+  {:model "syn:small:text"
+   :reasoning-effort "low"
+   :base-url "https://api.synthetic.new/openai/v1"
+   :api-key "REPLACE_COMPACTOR_API_KEY"}}
+
+ ;; Embeddings for memory recall
+ :embeddings
+ {:model "syn:embed"
+  :base-url "https://api.synthetic.new/openai/v1"
+  :api-key "REPLACE_EMBEDDINGS_API_KEY"}
+
+ :matrix
+ {:homeserver "https://matrix.example.org"
+  :access-token "REPLACE_ACCESS_TOKEN"
+  :room-id "!room:example.org"
+  :user-id "@wayfinder:example.org"}
+
+ :state-dir "/var/lib/wayfinder"
+
+ ;; Optional tuning keys and their defaults:
+ ;; :ledger-cap 30
+ ;; :ledger-arg-length 72
+ ;; :send-gate-enabled? true
+ ;; :compact-threshold 8000
+ ;; :compact-target 5000
+ ;; :compact-cooldown 120
+ ;; :curate-interval 1800
+ ;; :cues-enabled? true
+ ;; :cue-threshold 0.75
+ ;; :cue-max 2
+ ;; :cue-cooldown-items 50
+ ;; :tools-dir "/home/wayfinder/tools"   ;; directory of .clj tool manifests (default: ~/tools)
+ ;; :tools-watch-ms 1000                     ;; tool dir polling interval
+ ;; :typing-debounce-ms 8000        ;; quiet gap before a burst of user messages wakes the agent
+ ;; :typing-max-hold-ms 45000       ;; hard cap even if the user never stops typing
+ ;; :jev-filing-threshold 0.6      ;; confidence floor for deterministic memory filing routes
+ ;; :jev-curate-threshold 0.65     ;; confidence floor for Jev curation verdicts
+ }
+
+
+  ;; Optional Jev integration:
+  :jev {:api-key "REPLACE_JEV_API_KEY"  ;; or set JEV_API_KEY env var
+        :model "jev-latest"              ;; pin to specific version
+        :base-url "https://api.typesafe.ai" ;; override for proxies
+        ;; without key: falls back to legacy heuristics/embeddings
+
+        ; Thresholds for send-message gate (dup, news, triage)
+        :jev-send-dup-threshold 0.6        ; Similarity threshold for duplicate detection [default 0.6]
+        :jev-send-news-threshold 0.35      ; Similarity threshold for news detection  [default 0.35]
+        :jev-triage-threshold 0.55         ; Similarity threshold for triage decisions [default 0.55]
+
+        ;; Jev is used for three gate-only behaviors (no LLM compactor fallback):
+        ;; (a) send-message gate - prevents redundant emissions
+        ;; (b) compaction triage - decides what to compact/skip
+        ;; (c) memory recall + passive cues - blends embeddings with Jev recognition
+        ;; Without :api-key, behavior is unchanged from before Jev integration
+        ;; (Jaccard/embedding heuristics + LLM compactor)}}
