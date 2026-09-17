@@ -121,6 +121,12 @@
 ;; path+summary judgments out to Jev, bounded and chunked per call.
 (def ^:private jev-scoring-max-memories 100)
 
+;; Filing states carry full item lines (not summaries), so both bounds here are
+;; tighter than elsewhere: states must stay well under Jev's ~32k-token request
+;; budget, and full untruncated content made a 60-item chunk blow it (real log
+;; failures). Every line is truncated and chunks are capped at 20 items.
+(def ^:private jev-filing-chunk-size 20)
+
 ;; --- Jev filing routing ---
 ;; Compaction used to hand every item to the Scribe LLM even when it plainly
 ;; belongs in an existing file. Jev's closed-set choice is a cheap first hop:
@@ -151,7 +157,7 @@
                                    (clojure.string/join "\n"
                                      (map #(str (:path %) " — " (:summary %)) idx))
                                    "\n\nITEMS TO FILE:\n"
-                                   (clojure.string/join "\n" (map format-item chunk)))
+                                   (clojure.string/join "\n" (map #(trunc (format-item %) 350) chunk)))
                         questions (into {}
                                     (map (fn [item]
                                            ;; The question id is never shown to the model —
@@ -172,7 +178,7 @@
                                   (when (and path (:confidence answer) (>= (:confidence answer) threshold))
                                     [(:id item) {:path path :confidence (double (:confidence answer))}])))
                               chunk)))))
-                (jev/chunk-batch (vec items))))]
+                (partition-all jev-filing-chunk-size (vec items))))]
         (when @answered routes))
       (catch Exception e
         (println (format "[scribe] Jev filing failed: %s" (.getMessage e)))

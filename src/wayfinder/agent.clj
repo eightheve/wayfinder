@@ -117,6 +117,19 @@
       (str (subs c 0 max-result-length) "...")
       c)))
 
+;; The Jev state builders (send gate, drift nudge) render whole context lines
+;; into one request, and those states are token-budget bound like every other
+;; Jev call: a single 10k-char tool result in the middle of the context block
+;; can blow the ~32k-token request. Rendered lines get their own much smaller
+;; cap than stored results.
+(def ^:private context-line-max 1500)
+
+(defn- trunc [s max-len]
+  (let [s (str s)]
+    (if (> (count s) max-len)
+      (str (subs s 0 max-len) "...")
+      s)))
+
 (defn- ledger-opts [cfg]
   {:cap (or (:ledger-cap cfg) 30)
    :arg-length (or (:ledger-arg-length cfg) 72)})
@@ -210,8 +223,8 @@
                  :user-message (str "[user] " (get-in item [:data :content]))
                  :action-result (let [c (get-in item [:data :content])]
                                   (when-not (newsless-result? c)
-                                    (str "[tool result|" (get-in item [:data :caused-by]) "] " (trunc-result c))))
-                 :memory (str "[memory recall] " (trunc-result (get-in item [:data :content])))
+                                    (str "[tool result|" (get-in item [:data :caused-by]) "] " (trunc c context-line-max))))
+                 :memory (str "[memory recall] " (trunc (get-in item [:data :content]) context-line-max))
                  :memory-cue (str "[memory cue] " (get-in item [:data :content]))
                  :system-note (str "[system] " (get-in item [:data :content]))
                  nil)))
