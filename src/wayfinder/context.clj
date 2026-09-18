@@ -99,7 +99,11 @@
 ;; It records that an action happened, never its payload — the digest is a
 ;; recognition aid, not a copy of the result.
 
-(def ^:private default-ledger-cap 30)
+;; The ledger renders as a fixed system message after the item stream — always
+;; past the first divergence point — so every entry is re-read by the provider
+;; every single turn and never serves a cache hit. Halving the cap halves that
+;; per-turn tax while the rollup line still preserves the count of past actions.
+(def ^:private default-ledger-cap 15)
 (def ^:private default-ledger-arg-length 72)
 
 (def ^:private ledger-stamp

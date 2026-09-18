@@ -32,6 +32,35 @@
           (println (format "[llm] Embedding failed: status %d, body: %s" (:status resp) (trunc (:body resp) 500)))
           nil)))))
 
+;; Prefix-cache telemetry. The provider reports how many prompt tokens were
+;; served from its cache (usage.prompt_tokens_details.cached_tokens); tracking
+;; it per call shows whether context edits are preserving or busting the cache,
+;; which is otherwise invisible from the outside.
+(defonce cache-stats (atom {:calls 0 :cached 0 :prompt 0 :recent []}))
+
+(defn- note-cache-usage!
+  "Update the running cache-hit totals and log one line per call. Calls whose
+   usage lacks cached_tokens or prompt_tokens are skipped — there is nothing
+   meaningful to log for them."
+  [usage]
+  (let [prompt (:prompt_tokens usage)
+        cached (get-in usage [:prompt_tokens_details :cached_tokens])]
+    (when (and (number? prompt) (pos? prompt) (number? cached))
+      (let [pct (* 100.0 (/ (double cached) (double prompt)))
+            r (swap! cache-stats
+                     ;; Pass this call's totals as args: destructuring the old
+                     ;; state would shadow them and accumulate the state twice.
+                     (fn [{:keys [calls cached prompt recent]} add-cached add-prompt]
+                       {:calls (inc calls)
+                        :cached (+ cached add-cached)
+                        :prompt (+ prompt add-prompt)
+                        :recent (take-last 50 (conj recent pct))})
+                     cached prompt)]
+        (println (format "[llm] cache: %d/%d tokens (%.1f%%) — last %d avg %.1f%%"
+                         cached prompt pct
+                         (count (:recent r))
+                         (/ (reduce + (:recent r)) (count (:recent r)))))))))
+
 (defn complete [base-url api-key model messages tools reasoning-effort]
   (let [url (str base-url "/chat/completions")
         body (json/generate-string
@@ -55,11 +84,10 @@
       (do
         (println (format "[llm] Response: status %d, %d ms" (:status resp) elapsed))
         (if (= 200 (:status resp))
-          (-> (:body resp)
-              (json/parse-string true)
-              :choices
-              first
-              :message)
+          (let [data (-> (:body resp) (json/parse-string true))
+                message (-> data :choices first :message)]
+            (note-cache-usage! (:usage data))
+            message)
           (do
             (println (format "[llm] Request failed: body: %s" (trunc (:body resp) 500)))
             (throw (ex-info (str "LLM request failed: status " (:status resp))

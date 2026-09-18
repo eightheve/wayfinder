@@ -533,8 +533,19 @@
 
 (defn process-turn [ctx cfg system-prompt idle-count recently-sent]
   (try
-    (let [response (call-llm ctx cfg system-prompt idle-count)]
-      (if-let [actions (seq (parse-tool-calls response))]
+    (let [response (call-llm ctx cfg system-prompt idle-count)
+          actions (seq (parse-tool-calls response))]
+      ;; Preserve the provider's native reasoning before any action executes:
+      ;; the assistant message carries its thinking trace as :reasoning, which
+      ;; was previously dropped entirely. Recording it here gives the item an
+      ;; id (and rendered position) before the turn's tool_calls, keeps the
+      ;; model's own reasoning visible across turns (coherence), and turns
+      ;; otherwise-lost bytes into stable prefix the next call can hit. The
+      ;; blank-guard mirrors the REASON-with-empty-content handling.
+      (when (and (get cfg :preserve-reasoning true)
+                 (not (clojure.string/blank? (str (:reasoning response)))))
+        (swap! ctx context/add-item :reasoning {:content (:reasoning response)}))
+      (if-let [actions actions]
         ;; All of a turn's sends form ONE batch judged by one gate decision
         ;; (multi-bubble texting is legitimate; see execute-send-batch);
         ;; everything else executes in its original order, exactly as before.
@@ -581,9 +592,13 @@
                 (println (format "[agent] memory orientation failed: %s" (.getMessage e))))))
         system-prompt (load-system-prompt (or (:prompts-dir cfg) "prompts"))
         monitor (Object.)
-        threshold (or (:compact-threshold cfg) 8000)
+        ;; Compaction rewrites early items, so every compaction busts the
+        ;; entire prefix cache. Compacting half as often with the same target
+        ;; amortizes that bust over a longer stable window: each cache flush
+        ;; buys ~2x the tokens of shared prefix before the next one.
+        threshold (or (:compact-threshold cfg) 16000)
         target (or (:compact-target cfg) 5000)
-        cooldown-ms (* (or (:compact-cooldown cfg) 120) 1000)
+        cooldown-ms (* (or (:compact-cooldown cfg) 300) 1000)
         last-compact (atom (System/currentTimeMillis))
         curate-interval (* (or (:curate-interval cfg) 1800) 1000)
         last-curate (atom (System/currentTimeMillis))
@@ -592,7 +607,7 @@
         _ (custom-tools/start! cfg)]
     (start-message-watcher ctx cfg monitor)
     (println (format "Wayfinder agent running. Connected to Matrix. Compact threshold=%d tokens target=%d tokens cooldown=%ds curate-interval=%ds"
-               threshold target (or (:compact-cooldown cfg) 120) (or (:curate-interval cfg) 1800)))
+               threshold target (or (:compact-cooldown cfg) 300) (or (:curate-interval cfg) 1800)))
     (loop [delay default-delay waited? false marker-id nil]
       (let [start (System/currentTimeMillis)
             pre-sleep-id (dec (:next-id @ctx))]
