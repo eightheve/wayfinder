@@ -204,18 +204,19 @@
        (map #(get-in % [:data :content]))))
 
 ;; --- Jev send gate ---
-;; The old send gate was two brittle heuristics: Jaccard word-overlap for
-;; near-duplicate detection and a hard "nothing new arrived since your last
-;; message" rule for holding sends. Both decision types are exactly what Jev
-;; is for: one parallel call judges near-duplication against each recently
-;; sent message and newsworthiness against the recent context. Heuristics
-;; remain as the fallback when Jev is unreachable.
-
-(def ^:private send-gate-prior-send-candidates 5)
+;; Byte identity is not semantic identity: "yes" after a statement the agent
+;; already made is filler, but "yes" answering a question the user just asked
+;; is a genuine reply — the words alone cannot tell those apart, only the
+;; surrounding dialogue can. So the gate renders the recent conversation and
+;; asks one question with one threshold: does the candidate message add new
+;; meaning at the conversation's current position? Two gates with two
+;; thresholds would just double-tune a single behavior. The Jaccard near-dup
+;; rejection and the no-new-input hold remain as fallbacks for when Jev has
+;; no opinion.
 
 (defn- recent-context-lines
-  "One line per informative recent context item, oldest first — the state the
-   send gate's newsworthiness judgment is made against."
+  "One line per informative recent context item, oldest first — the state
+   Jev's drift judgment is made against."
   [ctx-val n]
   (->> (:items ctx-val)
        (keep (fn [item]
@@ -231,64 +232,53 @@
        (take-last n)
        (clojure.string/join "\n")))
 
+(defn- conversation-lines
+  "One line per dialogue beat, oldest first — only the user's messages and
+   the agent's own sends. This is the raw exchange, not the annotated ledger:
+   the send gate must see the actual back-and-forth to tell a fresh answer
+   to a new question apart from a repeat of what was already said."
+  [ctx-val n]
+  (->> (:items ctx-val)
+       (keep (fn [item]
+               (case (:type item)
+                 :user-message (str "user: " (get-in item [:data :content]))
+                 :action (when (= :send-message (get-in item [:data :action-type]))
+                           (str "agent: " (get-in item [:data :params :content])))
+                 nil)))
+       (take-last n)
+       (map #(trunc % 400))
+       (clojure.string/join "\n")))
+
 (defn- jev-send-verdict
-  "One Jev call per candidate message: state carries recent context + the
-   messages already sent + the candidate; parallel nouls judge near-duplication
-   against each prior send and the message's newsworthiness. Returns
-   :send/:duplicate/:hold, or nil when Jev gives no opinion (caller uses
-   heuristics)."
-  [ctx cfg candidate-sends content]
+  "One Jev call, one question: does the candidate batch add genuinely new
+   semantic content given the dialogue so far? Returns a map
+   {:verdict :send-or-:hold :p probability :floor threshold}, or nil when
+   Jev gives no opinion (caller uses heuristics)."
+  [ctx cfg content]
   (when (and (jev/available? cfg) (send-gate-enabled? cfg))
-    (let [priors (vec (take-last send-gate-prior-send-candidates candidate-sends))
-          dup-threshold (or (:jev-send-dup-threshold cfg) 0.6)
-          news-threshold (or (:jev-send-news-threshold cfg) 0.35)
-          prior-block (if (seq priors)
-                        (clojure.string/join "\n"
-                          (map-indexed (fn [i s] (format "PRIOR %d: %s" (inc i) s)) priors))
-                        "(none)")
-          state (str "RECENT CONTEXT (newest last):\n"
-                     (recent-context-lines @ctx 8)
-                     "\n\nMESSAGES ALREADY SENT (the user already has these):\n"
-                     prior-block
-                     "\n\nCANDIDATE MESSAGE (not yet sent):\n"
+    (let [threshold (or (:jev-send-threshold cfg) 0.5)
+          state (str "RECENT CONVERSATION (chronological):\n"
+                     (conversation-lines @ctx 10)
+                     "\n\nCANDIDATE MESSAGE(S) the agent wants to send next:\n"
                      content)
-          questions (cond-> {}
-                      :always
-                      (assoc "newsworthy"
-                             {:type "noul"
-                              :instructions (str "Does the candidate message contain something genuinely new for the user — "
-                                                 "a new finding, an answer to a recent user message, or information the "
-                                                 "user does not yet have from the recent context? A bare acknowledgment, a "
-                                                 "restate-what-I-just-said filler, or commentary with no new content is NO.")
-                              :criteria {"true" "Carries new information or answers something pending"
-                                         "false" "Nothing new: restatement, filler, or self-reply chatter"}})
-                      (seq priors)
-                      (into (map-indexed (fn [i _]
-                                           [(str "restate_" (inc i))
-                                            {:type "noul"
-                                             :instructions (str "Is the candidate message substantially a restatement, rephrasing, "
-                                                                "or re-answer of PRIOR " (inc i) "? The user already has PRIOR " (inc i)
-                                                                " — re-sending its substance, even with different words or small "
-                                                                "additions, is YES.")
-                                             :criteria {"true" "Substantially the same message"
-                                                        "false" "Genuinely different content"}}])
-                                         priors)))
-          result (jev/evaluate cfg state questions)
-          answers (:answers result)]
-      (when result
-        (let [dup-priors (->> (range 1 (inc (count priors)))
-                              (keep (fn [i] (jev/noul-of answers (str "restate_" i))))
-                              (seq))
-              max-dup (when dup-priors (apply max dup-priors))
-              news (jev/noul-of answers "newsworthy")]
-          (println (format "[agent] Jev send gate: %s%s"
-                     (if news (format "newsworthy=%.3f (hold below %.2f)" (double news) news-threshold) "newsworthy=n/a")
-                     (if max-dup (format " max-restatement=%.3f (reject above %.2f)" (double max-dup) dup-threshold) "")))
-          (cond
-            (and max-dup (>= max-dup dup-threshold)) :duplicate
-            (and news (< news news-threshold)) :hold
-            news :send
-            :else nil))))))
+          result (jev/evaluate cfg state
+                   {"adds-meaning"
+                    {:type "noul"
+                     :instructions (str "The conversation so far is in the state. Does the candidate message add genuinely new semantic content for the user — "
+                                        "something they do not already know or have from the conversation's current position? A short answer ('yes', 'ok', 'done') is NEW content when it answers a question or confirms something pending in the conversation; the SAME words with nothing new pending are filler. Restating, rephrasing, or continuing what the agent already said redundantly is NOT new.")
+                     :criteria {"true" "User gains information, answers, or closure they did not already have"
+                                "false" "Nothing new: restatement, bare filler, or self-reply chatter"}}})
+          p (when result (jev/noul-of (:answers result) "adds-meaning"))
+          verdict (cond
+                    (nil? p) nil
+                    (>= p threshold) :send
+                    :else :hold)]
+      (println (format "[agent] Jev send gate: semantic-novelty %s (send floor %.2f) → %s"
+                 (if p (format "p=%.3f" (double p)) "p=n/a")
+                 (double threshold)
+                 (if verdict (name verdict) "no-opinion")))
+      (when verdict
+        {:verdict verdict :p p :floor threshold}))))
 
 ;; --- Jev drift nudge ---
 ;; The idle-count ladder is arithmetic: it escalates by count alone, whether
@@ -343,9 +333,10 @@
         ;; already in context is the untouched prior world the gate judges.
         held? (and (send-gate-enabled? cfg)
                    (send-held? @ctx (:next-id @ctx)))
-        ;; Jev decides duplication and newsworthiness in one call when
-        ;; available; the verdict nil hands off to the old heuristics.
-        jev-verdict (jev-send-verdict ctx cfg @recently-sent combined)
+        ;; Jev judges whether the batch adds new meaning when available; a
+        ;; nil verdict hands off to the old heuristics.
+        jev-result (jev-send-verdict ctx cfg combined)
+        jev-verdict (:verdict jev-result)
         near-dup (when-not jev-verdict
                    (some #(when (> (similarity combined %) resend-similarity-threshold) %)
                      @recently-sent))
@@ -361,16 +352,15 @@
                                (conj acc [(dec (:next-id @ctx)) send])))
                     acc))]
     (cond
-      (or (= :duplicate jev-verdict) near-dup)
-      ;; Hard backstop against restatement sprees: recently-sent finally
-      ;; earns its keep. The rejection is reported as the tool result so
-      ;; the model learns why nothing was delivered. One verdict covers the
-      ;; whole batch, so every bubble is rejected.
+      near-dup
+      ;; Fallback backstop against restatement sprees (only when Jev has no
+      ;; opinion): recently-sent finally earns its keep. The rejection is
+      ;; reported as the tool result so the model learns why nothing was
+      ;; delivered. One verdict covers the whole batch, so every bubble is
+      ;; rejected.
       (doseq [[action-id send] bubbles]
-        (println (format "[agent] send-message REJECTED as near-duplicate (item %d%s, %s)"
-                   action-id
-                   (if jev-verdict " via Jev" (format ", similarity > %.1f" resend-similarity-threshold))
-                   (if jev-verdict "probabilistic restatement" "Jaccard similarity")))
+        (println (format "[agent] send-message REJECTED as near-duplicate (item %d, similarity > %.1f)"
+                   action-id resend-similarity-threshold))
         (swap! ctx context/add-item :action-result
           {:caused-by action-id
            :content "Send REJECTED: nearly identical to a message you already sent. The user already has that message — say something genuinely new, or stay silent. Do not respond to this rejection message, it is a purely internal result."})
@@ -380,14 +370,20 @@
 
       (or (= :hold jev-verdict) (and (not jev-verdict) held?))
       ;; Softer than the duplicate rejection: the message may be perfectly
-      ;; good, it just has nothing to answer. Held, not refused.
+      ;; good, it just has nothing to answer. Held, not refused. The Jev hold
+      ;; carries its evidence (probability and floor) in the result so the
+      ;; agent can tell a system verdict from a failed send.
       (doseq [[action-id send] bubbles]
         (println (format "[agent] send-message HELD (item %d): %s"
                    action-id
                    (if jev-verdict "Jev: nothing new to say" "nothing new since the last delivered message")))
         (swap! ctx context/add-item :action-result
           {:caused-by action-id
-           :content "No new input since your last message — hold, or record a note instead. (Message not sent.) Do not respond to this result, it is a purely internal one."})
+           :content (if jev-verdict
+                      (format "Message held by the send gate (evaluated as adding no new semantic content to the conversation, p=%s, floor %.2f). It was NOT delivered. Develop genuinely new content or stay quiet — do not respond to this result, it is a purely internal system verdict."
+                              (if-let [p (:p jev-result)] (format "%.3f" (double p)) "n/a")
+                              (double (or (:floor jev-result) (:jev-send-threshold cfg) 0.5)))
+                      "No new input since your last message — hold, or record a note instead. (Message not sent.) Do not respond to this result, it is a purely internal one.")})
         (swap! ctx context/record-action :send-message (:params send) false (ledger-opts cfg)))
 
       :else

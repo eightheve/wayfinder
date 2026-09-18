@@ -68,8 +68,7 @@
         ;; without key: falls back to legacy heuristics/embeddings
 
         ; Thresholds for send-message gate (dup, news, triage)
-        :jev-send-dup-threshold 0.6        ; Similarity threshold for duplicate detection [default 0.6]
-        :jev-send-news-threshold 0.35      ; Similarity threshold for news detection  [default 0.35]
+        ;; :jev-send-threshold 0.5 ;; send floor: minimum probability that a message adds new meaning
         :jev-triage-threshold 0.55         ; Similarity threshold for triage decisions [default 0.55]
 
         ;; Jev is used for three gate-only behaviors (no LLM compactor fallback):
