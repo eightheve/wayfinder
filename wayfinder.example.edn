@@ -60,6 +60,8 @@
  ;; :jev-curate-threshold 0.65     ;; confidence floor for Jev curation verdicts
  ;; :curate-chunk-size 25              ;; files reviewed per curation tick (rotating coverage)
  ;; :trash-retention-days 30           ;; trash/ files older than this are purged on each curation tick
+ ;; :sink-cap-bytes 10485760         ;; combined archive/ + trash/ cap; oldest files evicted first
+ ;; :backup-retention-days 30        ;; daily memory tar.gz backups kept in <state-dir>/memory-backups
  }
 
 

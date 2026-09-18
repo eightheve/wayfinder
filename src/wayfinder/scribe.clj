@@ -5,7 +5,8 @@
             [wayfinder.jev :as jev]
             [cheshire.core :as json]
             [clojure.edn]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [clojure.java.shell :as sh])
   (:import [java.io File]))
 
 (defn- memory-dir [cfg]
@@ -727,6 +728,7 @@
 
 (def ^:private default-curate-chunk-size 25)
 (def ^:private default-trash-retention-days 30)
+(def ^:private default-sink-cap-bytes 10485760)
 
 (defn- curate-cursor-file [cfg]
   (str (or (:state-dir cfg) "/var/lib/wayfinder") "/curate-cursor.edn"))
@@ -823,6 +825,119 @@
         (when (seq stale)
           (println (format "[scribe] PURGED %d stale trash files" (count stale))))))))
 
+(defn- enforce-sink-cap
+  "archive/ and trash/ are both append-only: the compactor dumps verbatim
+   items into archive/ and delete-memory files (plus embedding sidecars)
+   into trash/, and nothing ever shrank either, so both sinks grow forever.
+   Daily tar.gz backups of the live folder exclude both sinks, so their
+   contents have no recovery value — cap the pair COMBINED and evict the
+   globally oldest files first. Sidecars count as independent files in the
+   eviction pool, but an evicted trash/ .md also drags its .json sidecar
+   along even when the sidecar itself is newer (an off-by-a-few-KB total is
+   fine; the walk is idempotent). Best-effort: per-file failures are logged,
+   never thrown."
+  [dir cfg]
+  (try
+    ;; normalize: curate passes a String, but a File must work too (File.
+    ;; has no one-arg ctor taking a File)
+    (let [dir (io/file dir)
+          cap (or (:sink-cap-bytes cfg) default-sink-cap-bytes)
+          base (.toPath dir)
+          files (->> ["trash" "archive"]
+                     (keep #(let [d (File. dir %)] (when (.isDirectory d) d)))
+                     (mapcat file-seq)
+                     (filter #(.isFile %))
+                     (sort-by (juxt #(.lastModified %) #(.getPath %)))
+                     vec)
+          total (reduce + 0 (map #(.length %) files))]
+      ;; Oldest first, globally across both sinks: pop files until the
+      ;; combined byte total drops under the cap.
+      (loop [[f & more] files, gone #{}, total total, evicted 0, freed 0]
+        (if (and (> total cap) f)
+          (if (contains? gone f)
+            (recur more gone total evicted freed)
+            (let [rel (.toString (.relativize base (.toPath f)))
+                  sidecar (when (and (.startsWith rel "trash/") (.endsWith rel ".md"))
+                            (File. dir (sidecar-path rel)))
+                  sidecar-live (and sidecar (.exists sidecar) (not (contains? gone sidecar)))
+                  delete! (fn [f]
+                            (try
+                              (io/delete-file f)
+                              true
+                              (catch Exception e
+                                (println (format "[scribe] sink-cap eviction failed for %s: %s"
+                                           (.getPath f) (.getMessage e)))
+                                false)))
+                  ;; sizes are read BEFORE the deletes: a deleted File
+                  ;; reports a length of 0
+                  flen (.length f)
+                  ok (delete! f)
+                  evicted' (if ok (inc evicted) evicted)
+                  freed' (if ok (+ freed flen) freed)
+                  total' (if ok (- total flen) total)
+                  slen (when sidecar-live (.length sidecar))]
+              (if (and ok slen)
+                (if (delete! sidecar)
+                  (recur more (into gone [f sidecar])
+                         (- total' slen) (inc evicted') (+ freed' slen))
+                  (recur more (conj gone f) total' evicted' freed'))
+                (recur more (conj gone f) total' evicted' freed'))))
+          (do
+            (when (pos? evicted)
+              (println (format "[scribe] SINK CAP: evicted %d files (%d KB) from archive/trash (cap %d MB)"
+                         evicted (quot freed 1024) (quot cap 1048576))))
+            [evicted freed]))))
+    (catch Exception e
+      (println (format "[scribe] sink cap skipped: %s" (.getMessage e))))))
+
+(defn- write-daily-backup
+  "The sink cap throws away the only copy of evicted trash/archive content,
+   so the live memory folder needs its own recovery path: one tar.gz per
+   day, excluding both sinks (they are the things being capped), with
+   :backup-retention-days of history kept alongside. Idempotent per day —
+   curate ticks run every 30 minutes and the filename carries the date, so
+   the first tick of a day writes it and every later tick returns early.
+   Best-effort: failures are logged, never thrown."
+  [dir cfg]
+  (try
+    (let [dir (io/file dir)
+          backups-dir (io/file
+                       (or (:backups-dir cfg)
+                           (str (or (:state-dir cfg) "/var/lib/wayfinder") "/memory-backups")))
+          dst (File. backups-dir (str "memory-" (java.time.LocalDate/now) ".tar.gz"))]
+      (.mkdirs backups-dir)
+      (if (.exists dst)
+        dst
+        (let [parent (.getParentFile dir)
+              result (sh/sh "tar" "-czf" (.getPath dst) "-C" (.getPath parent)
+                            "--exclude=memory/archive" "--exclude=memory/trash" "memory")]
+          (if (zero? (:exit result))
+            (do
+              (println (format "[scribe] BACKUP wrote %s (%d KB)"
+                         (.getPath dst) (quot (.length dst) 1024)))
+              ;; Keep only the newest :backup-retention-days archives; the
+              ;; date in each filename sorts exactly like its mtime.
+              (let [keep (max 1 (or (:backup-retention-days cfg) 30))
+                    archives (->> (file-seq backups-dir)
+                                  (filter #(.isFile %))
+                                  (sort-by #(.getName %))
+                                  reverse)
+                    stale (drop keep archives)]
+                (doseq [f stale]
+                  (try
+                    (io/delete-file f)
+                    (catch Exception e
+                      (println (format "[scribe] backup prune failed for %s: %s"
+                                 (.getPath f) (.getMessage e))))))
+                (when (seq stale)
+                  (println (format "[scribe] BACKUP pruned %d old archives" (count stale)))))
+              dst)
+            (do (println (format "[scribe] BACKUP failed: %s" (trunc (:err result) 200)))
+                nil)))))
+    (catch Exception e
+      (println (format "[scribe] BACKUP failed: %s" (trunc (.getMessage e) 200)))
+      nil)))
+
 (defn- jev-curation-verdicts
   "One Jev choice per memory file — keep, delete, or rewrite — judged from
    each file's summary plus a short content preview. Returns
@@ -911,7 +1026,8 @@
       :content "Review your assigned chunk now."}]))
 
 (defn curate
-  "One rotation tick: purge stale trash, then review exactly one
+  "One rotation tick: run the hygiene step (purge stale trash, cap the
+   archive/trash sinks, snapshot the daily backup), then review exactly one
    topic-coherent chunk — Jev's delete verdicts execute deterministically
    (files move to trash/, nothing is lost) and every other verdict is only a
    hint for the LLM pass. Each successful tick advances the persisted cursor
@@ -927,6 +1043,17 @@
       (try (purge-stale-trash dir cfg)
            (catch Exception e
              (println (format "[scribe] trash purge skipped: %s" (.getMessage e)))))
+      ;; Cap and backup follow the purge, still before the pass: evictions
+      ;; leave the live folder in its pre-pass shape, and the backup runs
+      ;; last so it captures that cleaned state. Both are fail-open on their
+      ;; own; the wraps just keep a hygiene hiccup from costing the chunk
+      ;; its LLM budget, same as the purge above.
+      (try (enforce-sink-cap dir cfg)
+           (catch Exception e
+             (println (format "[scribe] sink cap skipped: %s" (.getMessage e)))))
+      (try (write-daily-backup dir cfg)
+           (catch Exception e
+             (println (format "[scribe] daily backup skipped: %s" (.getMessage e)))))
       (let [index (scan-index dir)]
         (if (empty? index)
           (do (println "[scribe] CURATE: memory index empty — nothing to curate")
