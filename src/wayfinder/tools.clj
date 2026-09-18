@@ -52,7 +52,7 @@
    {:type "function"
     :function
     {:name "read-memory"
-     :description "Read the full contents of a memory file"
+     :description "Read the full contents of a memory file. Long files are returned truncated at 8000 characters with a truncation notice — read in passes via follow-up reads if you need more."
      :parameters
      {:type "object"
       :properties

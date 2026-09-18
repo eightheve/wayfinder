@@ -58,6 +58,8 @@
  ;; :typing-max-hold-ms 45000       ;; hard cap even if the user never stops typing
  ;; :jev-filing-threshold 0.6      ;; confidence floor for deterministic memory filing routes
  ;; :jev-curate-threshold 0.65     ;; confidence floor for Jev curation verdicts
+ ;; :curate-chunk-size 25              ;; files reviewed per curation tick (rotating coverage)
+ ;; :trash-retention-days 30           ;; trash/ files older than this are purged on each curation tick
  }
 
 

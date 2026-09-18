@@ -4,6 +4,7 @@
             [wayfinder.tools :as tools]
             [wayfinder.jev :as jev]
             [cheshire.core :as json]
+            [clojure.edn]
             [clojure.java.io :as io])
   (:import [java.io File]))
 
@@ -117,9 +118,12 @@
       tag
       content)))
 
-;; Cap shared by Jev summary ranking (below) and Jev filing routing: both fan
-;; path+summary judgments out to Jev, bounded and chunked per call.
-(def ^:private jev-scoring-max-memories 100)
+;; Filing routes every indexed file at Jev as a Choice option, so this cap is
+;; Jev's ceiling, not a preference: Choice supports at most 255 options
+;; including "new-file", and the real corpus (114 files and growing) already
+;; blew past the old shared cap of 100 — files beyond it were unrouteable and
+;; silently always fell through to the LLM pass.
+(def ^:private jev-filing-max-memories 250)
 
 ;; Filing states carry full item lines (not summaries), so both bounds here are
 ;; tighter than elsewhere: states must stay well under Jev's ~32k-token request
@@ -143,7 +147,7 @@
   [cfg items index]
   (when (and (jev/available? cfg) (seq items) (seq index))
     (try
-      (let [idx (vec (take jev-scoring-max-memories index))
+      (let [idx (vec (take jev-filing-max-memories index))
             threshold (or (:jev-filing-threshold cfg) 0.6)
             criteria (into {"new-file" "None of the existing files fits — this needs its own new memory file."}
                            (map (fn [{:keys [path summary]}] [path (trunc summary 100)]))
@@ -185,27 +189,41 @@
         nil))))
 
 (defn- execute-scribe-action [dir cfg action]
-  (let [{:keys [action-type params]} action]
-    (case action-type
-      :list-memories {:content (if-let [index (seq (scan-index dir))]
-                                 (->> index
-                                      (map #(str (:path %) " — " (:summary %)))
-                                      (clojure.string/join "\n"))
-                                 "No memories stored")}
-      :read-memory (do
-                     (println (format "[scribe] READ %s" (:path params)))
-                     {:content (read-memory-file dir (:path params))})
-      :write-memory (do
-                      (println (format "[scribe] WRITE %s — %s"
-                                 (:filename params)
-                                 (trunc (get params :content "") 120)))
-                      {:content (do (write-memory-file dir (:filename params) (:content params) cfg)
-                                    "Memory written")})
-      :delete-memory (do
-                       (println (format "[scribe] DELETE %s" (:path params)))
-                       {:content (do (delete-memory-file dir (:path params))
-                                     "Memory deleted")})
-      {:content "Unknown action"})))
+  ;; :action rides along on every result so the caller can audit which paths
+  ;; a pass actually touched — coverage accounting for chunked curation.
+  (assoc (let [{:keys [action-type params]} action]
+           (case action-type
+             :list-memories {:content (if-let [index (seq (scan-index dir))]
+                                        (->> index
+                                             (map #(str (:path %) " — " (:summary %)))
+                                             (clojure.string/join "\n"))
+                                        "No memories stored")}
+             :read-memory (do
+                            (println (format "[scribe] READ %s" (:path params)))
+                            ;; Cap what one read can inject into the loop: the
+                            ;; largest file on the real corpus measured 31k
+                            ;; chars — enough to crowd out the scribe's own
+                            ;; plan. The tool description already promises this
+                            ;; truncation; the suffix names the total so the
+                            ;; model knows what it did not see.
+                            (let [content (read-memory-file dir (:path params))
+                                  total (count content)]
+                              {:content (if (> total 8000)
+                                          (str (trunc content 8000)
+                                               (format "\n...[truncated, %d chars total]" total))
+                                          content)}))
+             :write-memory (do
+                             (println (format "[scribe] WRITE %s — %s"
+                                        (:filename params)
+                                        (trunc (get params :content "") 120)))
+                             {:content (do (write-memory-file dir (:filename params) (:content params) cfg)
+                                           "Memory written")})
+             :delete-memory (do
+                              (println (format "[scribe] DELETE %s" (:path params)))
+                              {:content (do (delete-memory-file dir (:path params))
+                                            "Memory deleted")})
+             {:content "Unknown action"}))
+         :action action))
 
 (def ^:private max-scribe-rounds 12)
 
@@ -213,35 +231,68 @@
   "Multi-round tool loop: execute the scribe's tool calls, feed the results
    back, and let it continue until it stops calling tools (or the round cap).
    A single round is not enough for curation, whose prompt instructs
-   list -> read -> merge/write/delete."
-  [cfg dir messages]
-  (let [agent-cfg (get-in cfg [:agents :scribe])]
-    (loop [messages messages round 1 all-results []]
-      (let [response (llm/complete (:base-url agent-cfg) (:api-key agent-cfg)
+   list -> read -> merge/write/delete.
+   With opts {:must-cover paths :max-continue n}, an early quit becomes a
+   nudge: when the model stops with no tool calls while must-cover files were
+   never read, written, or deleted, it is told to finish — up to max-continue
+   (default 2) times — instead of ending the pass with the assignment half
+   done. Coverage counts every read-memory :path, write-memory :filename and
+   delete-memory :path across all rounds."
+  ([cfg dir messages] (run-scribe-turn cfg dir messages nil))
+  ([cfg dir messages {:keys [must-cover max-continue] :or {max-continue 2}}]
+   (let [agent-cfg (get-in cfg [:agents :scribe])
+         must-cover (set must-cover)]
+     (loop [messages messages round 1 all-results [] covered #{} nudges 0]
+       (let [response (llm/complete (:base-url agent-cfg) (:api-key agent-cfg)
                        (:model agent-cfg) messages tools/scribe-tool-definitions (:reasoning-effort agent-cfg))
-            actions (seq (parse-scribe-calls response))]
-        (if-not actions
-          (do
-            (when (= round 1)
-              (println (format "[scribe] LLM returned no tool calls. Content: %s" (trunc (or (:content response) "(nil)") 200))))
-            all-results)
-          (let [_ (println (format "[scribe] round %d/%d: %d actions: %s"
-                             round max-scribe-rounds (count actions)
-                             (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
-                results (mapv #(execute-scribe-action dir cfg %) actions)]
-            (if (>= round max-scribe-rounds)
-              (do (println "[scribe] max rounds reached, stopping")
-                  (into all-results results))
-              (recur (-> messages
-                         (conj {:role "assistant" :content nil
-                                :tool_calls (:tool_calls response)})
-                         (into (map (fn [call result]
-                                      {:role "tool"
-                                       :tool_call_id (:id call)
-                                       :content (:content result)})
-                                    (:tool_calls response) results)))
-                     (inc round)
-                     (into all-results results)))))))))
+             actions (seq (parse-scribe-calls response))]
+         (if-not actions
+           (do
+             ;; Log every stop, not just round 1: the model declares
+             ;; completion in prose after its focus list, and that content
+             ;; used to vanish from the log on later rounds.
+             (println (format "[scribe] LLM returned no tool calls (round %d). Content: %s"
+                       round (trunc (or (:content response) "(nil)") 300)))
+             (let [uncovered (vec (remove covered must-cover))]
+               ;; Also respect the round cap here: a nudge must never push the
+               ;; loop past max-scribe-rounds.
+               (if (and (seq uncovered) (< nudges max-continue) (< round max-scribe-rounds))
+                 (do
+                   (println (format "[scribe] model stopped early — %d of %d files unreviewed, continuing"
+                              (count uncovered) (count must-cover)))
+                   (recur (conj messages
+                                {:role "user"
+                                 :content (format "You stopped without finishing. These files are still unreviewed: %s. Continue: read or explicitly keep each one, then reply DONE."
+                                                  (clojure.string/join ", " (sort uncovered)))})
+                          (inc round) all-results covered (inc nudges)))
+                 all-results)))
+           (let [_ (println (format "[scribe] round %d/%d: %d actions: %s"
+                              round max-scribe-rounds (count actions)
+                              (->> actions (map (comp name :action-type)) (clojure.string/join ", "))))
+                 results (mapv #(execute-scribe-action dir cfg %) actions)
+                 covered (into covered
+                           (keep (fn [{:keys [action-type params]}]
+                                   (case action-type
+                                     :read-memory (:path params)
+                                     :write-memory (:filename params)
+                                     :delete-memory (:path params)
+                                     nil)))
+                           actions)]
+             (if (>= round max-scribe-rounds)
+               (do (println "[scribe] max rounds reached, stopping")
+                   (into all-results results))
+               (recur (-> messages
+                          (conj {:role "assistant" :content nil
+                                 :tool_calls (:tool_calls response)})
+                          (into (map (fn [call result]
+                                       {:role "tool"
+                                        :tool_call_id (:id call)
+                                        :content (:content result)})
+                                     (:tool_calls response) results)))
+                      (inc round)
+                      (into all-results results)
+                      covered
+                      nudges)))))))))
 
 ;; append-note is defined below with the other direct-write primitives; its
 ;; reentrant locking makes it safe to call from inside this function's lock.
@@ -441,7 +492,10 @@
   [cfg query index]
   (when (and (jev/available? cfg) (seq index))
     (try
-      (let [mems (vec (take jev-scoring-max-memories index))]
+      ;; No cap here: every memory deserves a relevance score, and
+      ;; jev/chunk-batch already bounds each call — a bigger index just means
+      ;; more chunks, not a bigger request.
+      (let [mems (vec index)]
         (reduce into {}
           (keep
             (fn [chunk]
@@ -660,18 +714,124 @@
 
 ;; --- Memory curation ---
 
-;; Curation fires on a timer; without a change detector it would re-run the
-;; multi-round LLM pass over an unchanged index forever. The fingerprint is
-;; stored only AFTER a pass completes, so a pass that throws leaves it unset
-;; and the next tick retries.
-(defonce ^:private curate-fingerprint (atom nil))
+;; Curation used to skip its pass whenever the index fingerprint matched the
+;; last one — but the corpus outgrew any single pass (114 files against a
+;; 12-round LLM budget), so "unchanged" came to mean "never fully reviewed",
+;; and trash/ meanwhile grew to 196 files that no pass ever saw. Rotation
+;; replaces the fingerprint: each tick reviews exactly one topic-coherent
+;; chunk and advances a persisted cursor, cycling the whole corpus every
+;; chunk-count ticks regardless of churn. A pass that throws leaves the
+;; cursor untouched, so the same chunk retries next tick.
+
+(defonce ^:private curate-cursor (atom nil))
+
+(def ^:private default-curate-chunk-size 25)
+(def ^:private default-trash-retention-days 30)
+
+(defn- curate-cursor-file [cfg]
+  (str (or (:state-dir cfg) "/var/lib/wayfinder") "/curate-cursor.edn"))
+
+(defn- ensure-curate-cursor
+  "Seed the rotation cursor from disk once per process: the last completed
+   chunk index survives restarts, so a reboot resumes the cycle instead of
+   restarting it. Missing or malformed file just means chunk 0 — logged,
+   never thrown."
+  [cfg]
+  (when (nil? @curate-cursor)
+    (locking curate-cursor
+      (when (nil? @curate-cursor)
+        (try
+          (let [f (File. (curate-cursor-file cfg))]
+            (when (.exists f)
+              (let [state (clojure.edn/read-string (slurp f))]
+                (if (and (map? state) (int? (:chunk state)))
+                  (do (reset! curate-cursor state)
+                      (println (format "[scribe] curate cursor resumed at chunk %d (%s)"
+                                 (:chunk state) (:at state))))
+                  (println "[scribe] curate-cursor.edn malformed — starting at chunk 0")))))
+          (catch Exception e
+            (println (format "[scribe] curate cursor unreadable — starting at chunk 0 (%s)"
+                       (.getMessage e)))))))))
+
+(defn- save-curate-cursor
+  "Persist the cursor after a successful pass. Failure to write is logged,
+   not thrown: worst case a restart resumes from an older chunk and some
+   files get a second look sooner."
+  [cfg cursor-state]
+  (try
+    (let [f (File. (curate-cursor-file cfg))]
+      (.mkdirs (.getParentFile f))
+      (spit f (pr-str cursor-state)))
+    (catch Exception e
+      (println (format "[scribe] curate cursor save failed: %s" (.getMessage e))))))
+
+(defn- top-dir
+  "Top-level directory of a memory path — the topic bucket for chunking.
+   Root-level files (no slash) form their own group, labelled \"\"."
+  [path]
+  (let [path (str path)]
+    (if-let [slash (clojure.string/index-of path "/")]
+      (subs path 0 slash)
+      "")))
+
+(defn- curate-chunks
+  "Partition the index into topic-coherent chunks: files grouped by top-level
+   directory (so a colony's files land in one batch and the model can merge
+   across them), groups ordered alphabetically, then packed greedily — small
+   groups (one-file dirs like fiction/ or note/) share a chunk instead of each
+   costing a whole tick. A group larger than chunk-size still gets its own
+   sequential chunks, so big topics are never split mid-group, and the stable
+   ordering is what makes the persisted cursor meaningful across ticks."
+  [index chunk-size]
+  (->> index
+       (group-by #(top-dir (:path %)))
+       (sort-by key)
+       (reduce (fn [chunks [_ files]]
+                 (if (> (count files) chunk-size)
+                   (into chunks (partition-all chunk-size files))
+                   ;; pack small groups into the trailing chunk when they fit
+                   (if-let [last-chunk (peek chunks)]
+                     (if (<= (+ (count last-chunk) (count files)) chunk-size)
+                       (into (pop chunks) [(into last-chunk files)])
+                       (conj chunks (vec files)))
+                     [(vec files)])))
+               [])
+       vec))
+
+(defn- purge-stale-trash
+  "Deterministic hygiene, no LLM involved: delete-memory moves files into
+   trash/, where they used to sit forever — invisible to scan-index and so
+   to every curation pass. Files under trash/ older than the retention
+   window (embedding sidecars live beside them and age with them) are
+   deleted for good. Best-effort: failures are logged, never thrown."
+  [dir cfg]
+  (let [trash-dir (File. dir "trash")
+        cutoff (- (System/currentTimeMillis)
+                  (* (long (or (:trash-retention-days cfg) default-trash-retention-days))
+                     24 60 60 1000))]
+    (when (.isDirectory trash-dir)
+      (let [stale (->> (file-seq trash-dir)
+                       (filter #(.isFile %))
+                       (filter #(<= (.lastModified %) cutoff))
+                       vec)]
+        (doseq [f stale]
+          (try
+            (io/delete-file f)
+            (catch Exception e
+              (println (format "[scribe] trash purge failed for %s: %s"
+                         (.getPath f) (.getMessage e))))))
+        (when (seq stale)
+          (println (format "[scribe] PURGED %d stale trash files" (count stale))))))))
 
 (defn- jev-curation-verdicts
   "One Jev choice per memory file — keep, delete, or rewrite — judged from
    each file's summary plus a short content preview. Returns
    {path {:verdict :keep|:delete|:rewrite :confidence n}} or nil when Jev is
-   unavailable or no chunk answered; nil hands the whole pass back to the LLM
-   scribe exactly as before."
+   unavailable or no chunk answered; nil means no opinion at all: no
+   deterministic deletes, and the whole batch goes to the LLM scribe
+   hintless. These verdicts gate nothing — they are hints for the LLM pass,
+   except :delete, which is safe to execute deterministically here because
+   delete-memory-file only moves files to trash/."
   [cfg dir index]
   (when (and (jev/available? cfg) (seq index))
     (try
@@ -683,9 +843,9 @@
                 (fn [chunk]
                   (let [state (clojure.string/join "\n\n"
                                 (map (fn [{:keys [path summary]}]
-                                      (format "=== %s ===\n%s\n%s"
-                                        path summary (trunc (read-memory-file dir path) 200)))
-                                    chunk))
+                                       (format "=== %s ===\n%s\n%s"
+                                         path summary (trunc (read-memory-file dir path) 200)))
+                                     chunk))
                         questions (into {}
                                    (map-indexed
                                      (fn [i {:keys [path]}]
@@ -704,7 +864,7 @@
                         (keep-indexed
                           (fn [i {:keys [path]}]
                             (let [answer (get (:answers result) (str "f_" i))
-                                 choice (jev/choice-of (:answers result) (str "f_" i))]
+                                  choice (jev/choice-of (:answers result) (str "f_" i))]
                               ;; Below-threshold (or missing) confidence means
                               ;; 'no opinion': the file is simply left alone.
                               (when (and choice (:confidence answer) (>= (:confidence answer) threshold))
@@ -717,18 +877,23 @@
         nil))))
 
 (defn- curation-messages
-  "The curation prompt in today's shape (index + guidelines + review request).
-   With focus-paths set, Jev has already settled keep/delete for everything
-   else, so the pass is narrowed to a focused review of just those files."
-  [index focus-paths]
-  (let [index-str (->> index
-                       (map #(str (:path %) " — " (:summary %)))
-                       (clojure.string/join "\n"))
-        focus (when focus-paths
-                (format "\n\nFOCUSED REVIEW: Only these files need review this pass: %s. Keep and delete decisions for every other file have already been made — do not touch them."
-                        (clojure.string/join ", " focus-paths)))]
+  "The curation prompt, chunk-shaped: today's guidelines plus (a) a compact
+   full-corpus map, so the model can spot cross-chunk overlap worth merging,
+   (b) the assigned chunk with per-file Jev hints, and (c) an explicit DONE
+   contract — the model used to declare completion in prose after its focus
+   list and quit with most of the assignment unread. Verdicts are hints,
+   never filters: keep, rewrite, below-threshold and no-opinion files all
+   reach the LLM. Entries flagged :handled (deleted by Jev this pass) are
+   listed only so the model knows where those files went."
+  [index entries chunk-idx chunk-count]
+  (let [corpus-str (->> index
+                        (map #(str (:path %) " — " (trunc (:summary %) 60)))
+                        (clojure.string/join "\n"))
+        chunk-str (->> entries
+                       (map #(str (:path %) (when-let [hint (:hint %)] (str " " hint))))
+                       (clojure.string/join "\n"))]
     [{:role "system"
-      :content (str "You are the Scribe performing memory curation. Your job is to review all stored memories and clean them up.\n\n"
+      :content (str "You are the Scribe performing memory curation. Your job is to review the stored memories assigned to you this pass and clean them up.\n\n"
                     "Guidelines:\n"
                     "- List all memories first, then read any you need to examine.\n"
                     "- MERGE: If two or more files cover the same topic or contain overlapping information, write a single consolidated file and delete the originals.\n"
@@ -737,46 +902,88 @@
                     "- QUALITY: Every file should have a clear one-line summary as its first line. Rewrite files that lack this.\n"
                     "- Do NOT delete without reading. Do NOT merge without understanding the content.\n"
                     "- Be thorough but conservative. When in doubt, keep.\n\n"
-                    "Current memory index:\n" (or index-str "No memories stored")
-                    (or focus ""))}
+                    "Full memory index (" (count index) " files) — you are reviewing one chunk this pass, but the full map is here so you can spot overlapping content that belongs in your chunk:\n"
+                    (or corpus-str "No memories stored")
+                    (format "\n\nYou are reviewing CHUNK %d/%d:\n%s\n\n"
+                            (inc chunk-idx) chunk-count chunk-str)
+                    "For EVERY file in the chunk that is still present: read it, then either improve it (write-memory, merging overlapping content from other chunk files), delete it (delete-memory, only if worthless), or explicitly keep it (say so in prose). Files marked [Jev: delete-executed] have already been removed — leave them alone. Do not stop until every file still present in the chunk has been read. When all are handled, reply DONE.")}
      {:role "user"
-      :content (if focus-paths
-                 (str "Review only the files listed for focused review and perform any needed curation on them."
-                      " Files to review: " (clojure.string/join ", " focus-paths))
-                 "Review all memories and perform any needed curation.")}]))
+      :content "Review your assigned chunk now."}]))
 
-(defn curate [cfg]
-  (println "[scribe] CURATE: starting memory curation pass")
+(defn curate
+  "One rotation tick: purge stale trash, then review exactly one
+   topic-coherent chunk — Jev's delete verdicts execute deterministically
+   (files move to trash/, nothing is lost) and every other verdict is only a
+   hint for the LLM pass. Each successful tick advances the persisted cursor
+   by one chunk, so full coverage arrives in chunk-count ticks without any
+   single pass having to swallow the whole corpus."
+  [cfg]
   (locking scribe-io-lock
+    (ensure-curate-cursor cfg)
     (let [dir (ensure-dir (memory-dir cfg))
-          index (scan-index dir)
-          fingerprint (hash (mapv (juxt :path :summary) index))]
-      (if (= fingerprint @curate-fingerprint)
-        (do
-          (println "[scribe] CURATE: index unchanged since last pass — skipping")
-          [])
-        (let [verdicts (jev-curation-verdicts cfg dir index)]
-          (if (nil? verdicts)
-            ;; No Jev opinion: the full LLM pass, byte-identical prompt as
-            ;; before. The fingerprint is stored only after the pass returns;
-            ;; a thrown pass leaves it unset and the next tick retries.
-            (let [results (run-scribe-turn cfg dir (curation-messages index nil))]
-              (reset! curate-fingerprint fingerprint)
-              (println (format "[scribe] CURATE: completed, %d actions executed" (count results)))
-              results)
-            (let [deletes (into {} (filter (fn [[_ v]] (= :delete (:verdict v))) verdicts))
-                  rewrites (vec (map key (filter (fn [[_ v]] (= :rewrite (:verdict v))) verdicts)))]
-              ;; Deletes are safe to execute deterministically:
-              ;; delete-memory-file moves files to trash/, nothing is lost.
-              (doseq [[path {:keys [confidence]}] deletes]
-                (println (format "[scribe] CURATE DELETE %s (Jev, confidence %.2f)" path (double confidence)))
-                (delete-memory-file dir path))
-              (if (seq rewrites)
-                (let [results (run-scribe-turn cfg dir (curation-messages index rewrites))]
-                  (reset! curate-fingerprint fingerprint)
-                  (println (format "[scribe] CURATE: completed, %d actions executed" (count results)))
-                  results)
-                (do
-                  (reset! curate-fingerprint fingerprint)
-                  (println (format "[scribe] CURATE: Jev settled everything (%d deletions) — LLM pass skipped" (count deletes)))
-                  [])))))))))
+          chunk-size (max 1 (or (:curate-chunk-size cfg) default-curate-chunk-size))]
+      ;; Purge before the pass: pure file hygiene, and a failure here should
+      ;; not cost the chunk its LLM budget.
+      (try (purge-stale-trash dir cfg)
+           (catch Exception e
+             (println (format "[scribe] trash purge skipped: %s" (.getMessage e)))))
+      (let [index (scan-index dir)]
+        (if (empty? index)
+          (do (println "[scribe] CURATE: memory index empty — nothing to curate")
+              [])
+          (let [chunks (curate-chunks index chunk-size)
+                chunk-count (count chunks)
+                chunk-idx (mod (inc (or (:chunk @curate-cursor) -1)) chunk-count)
+                chunk (vec (nth chunks chunk-idx))
+                ;; Jev grades only this chunk; its per-call chunking (60
+                ;; questions) is inherited from jev-curation-verdicts itself.
+                verdicts (jev-curation-verdicts cfg dir chunk)
+                deletes (into {} (filter (fn [[_ v]] (= :delete (:verdict v))) verdicts))
+                rewrites (count (filter (fn [[_ v]] (= :rewrite (:verdict v))) verdicts))]
+            (println (format "[scribe] CURATE chunk %d/%d: %d files (%s) — Jev: %d deletes, %d rewrites flagged"
+                       (inc chunk-idx) chunk-count (count chunk)
+                       (->> chunk
+                            (map #(let [d (top-dir (:path %))] (if (= d "") "root" d)))
+                            distinct sort
+                            (clojure.string/join ", "))
+                       (count deletes) rewrites))
+            ;; Deletes are safe to execute deterministically:
+            ;; delete-memory-file moves files to trash/, nothing is lost.
+            (doseq [[path {:keys [confidence]}] deletes]
+              (println (format "[scribe] CURATE DELETE %s (Jev, confidence %.2f)" path (double confidence)))
+              (delete-memory-file dir path))
+            ;; Re-scan AFTER the deletes: the prompt used to list files that
+            ;; were already gone.
+            (let [live-paths (set (map :path (scan-index dir)))
+                  entries (map (fn [{:keys [path summary]}]
+                                 (if (contains? live-paths path)
+                                   {:path path :summary summary
+                                    :hint (when-let [{:keys [verdict confidence]} (get verdicts path)]
+                                            (when-not (= :delete verdict)
+                                              (format "[Jev: %s %.2f]" (name verdict) (double confidence))))}
+                                   {:path path :summary summary
+                                    :hint "[Jev: delete-executed]" :handled? true}))
+                               chunk)
+                  assigned (vec (remove :handled? entries))
+                  results (if (seq assigned)
+                            (run-scribe-turn cfg dir
+                                             (curation-messages index entries chunk-idx chunk-count)
+                                             {:must-cover (map :path assigned)})
+                            (do (println "[scribe] CURATE: Jev deleted every file in the chunk — LLM pass skipped")
+                                []))
+                  covered (->> results
+                               (keep (fn [{:keys [action]}]
+                                       (case (:action-type action)
+                                         :read-memory (get-in action [:params :path])
+                                         :write-memory (get-in action [:params :filename])
+                                         :delete-memory (get-in action [:params :path])
+                                         nil)))
+                               set)
+                  covered-n (count (filter covered (map :path assigned)))
+                  next-idx (mod (inc chunk-idx) chunk-count)
+                  cursor-state {:chunk chunk-idx :at (str (java.time.Instant/now))}]
+              (reset! curate-cursor cursor-state)
+              (save-curate-cursor cfg cursor-state)
+              (println (format "[scribe] CURATE chunk %d done: %d/%d files covered, cursor → %d"
+                         (inc chunk-idx) covered-n (count assigned) next-idx))
+              results)))))))
