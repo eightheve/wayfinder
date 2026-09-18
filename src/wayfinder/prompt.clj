@@ -68,15 +68,28 @@
 ;; The running idle total: a run of deliberate waits renders as one line with
 ;; real elapsed time, so the resident can tell twenty minutes from two without
 ;; the transcript logging every wait call.
+;;
+;; Rationale: accrue-wait mutates this item's data every wait tick, and the
+;; prompt is append-only between compactions — so a marker that renders
+;; differently every tick makes the prompt tail a cache-divergence point
+;; during idle stretches. Only the RENDER is quantized: elapsed time is
+;; rounded up to the next 5-minute bucket (12 changes/hr max instead of one
+;; per tick) and the waits tick-count is omitted from the line (bookkeeping;
+;; the model needs the elapsed signal, not the call count). The underlying
+;; data keeps full precision for the compactor, and :since stays exact since
+;; it derives from the fixed since-ms epoch.
 (defmethod render-item :wait-marker [item]
-  (let [{:keys [since-ms elapsed-ms waits]} (:data item)
+  (let [{:keys [since-ms elapsed-ms]} (:data item)
+        ;; Ceiling, not rounding, per the cache-divergence rationale above:
+        ;; understating elapsed idle is worse than overstating it.
+        bucketed-ms (long (* 300000 (Math/ceil (/ elapsed-ms 300000.0))))
         since (.format (java.time.LocalDateTime/ofInstant
                          (java.time.Instant/ofEpochMilli since-ms)
                          (java.time.ZoneId/systemDefault))
                 wait-marker-stamp)]
     {:role "user"
-     :content (format "[idle] Waiting since %s — ~%s elapsed across %d wait%s, no external input in that time."
-                since (human-duration elapsed-ms) waits (if (= 1 waits) "" "s"))}))
+     :content (format "[idle] Waiting since %s — ~%s elapsed (5-minute granularity), no external input in that time."
+                since (human-duration bucketed-ms))}))
 
 (defmethod render-item :default [item]
   {:role "user"
