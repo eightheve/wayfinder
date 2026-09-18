@@ -412,6 +412,50 @@
           (when (< i (dec (count bubbles)))
             (Thread/sleep 400)))))))
 
+(def ^:private default-max-wait-seconds 14400)
+
+(defn- coerce-wait-seconds
+  "Seconds as the model sent them: an integer or a numeric string. nil when
+   neither — garbage input falls back to the default wait instead of throwing
+   a ClassCastException out of the min/max clamp."
+  [v]
+  (cond
+    (int? v) (long v)
+    (and (string? v) (re-matches #"\s*\d+\s*" v)) (Long/parseLong (clojure.string/trim v))
+    :else nil))
+
+(defn- until-to-seconds
+  "Seconds from now until a local time spec: a full local date-time
+   ('2026-09-18T21:30', seconds optional) or a bare clock time ('21:30'),
+   which means its next occurrence — today if still ahead, otherwise tomorrow.
+   nil when the spec cannot be parsed, so the caller can fall back to :seconds.
+   A target already in the past yields 0; the caller's floor turns that into
+   an immediate short wait rather than an error."
+  [s]
+  (try
+    (let [now (java.time.LocalDateTime/now)
+          target (if (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?" s)
+                   (java.time.LocalDateTime/parse s)
+                   (let [today (java.time.LocalDateTime/of (.toLocalDate now)
+                                                           (java.time.LocalTime/parse s))]
+                     (if (.isAfter today now) today (.plusDays today 1))))]
+      (max 0 (quot (.toMillis (java.time.Duration/between now target)) 1000)))
+    (catch Exception _ nil)))
+
+(defn- parse-wait
+  "Resolve a wait call into seconds. :until wins over :seconds when present
+   and parseable; anything unparseable falls back to 300. The result is
+   silently clamped to [5, max]: an absurd duration is honored as best it can
+   be, not rejected — a sleep for days becomes a sleep for the longest
+   allowed span."
+  [cfg params]
+  (let [max-s (or (:max-wait-seconds cfg) default-max-wait-seconds)
+        until-s (clojure.string/trim (str (or (:until params) "")))
+        base (or (when (seq until-s) (until-to-seconds until-s))
+                 (coerce-wait-seconds (:seconds params))
+                 300)]
+    (max 5 (min max-s (long base)))))
+
 (defn execute-and-record [ctx cfg action recently-sent]
   (let [{:keys [action-type params call-id]} action]
     (cond
@@ -427,7 +471,7 @@
         nil)
 
       (= action-type :wait)
-      (let [secs (max 5 (min 300 (:seconds params)))]
+      (let [secs (parse-wait cfg params)]
         (println (format "[agent] WAIT %ds" secs))
         ;; Waiting is a decision, not idleness — at any duration. Charging the
         ;; idle counter for it made the cheapest legitimate turn the most

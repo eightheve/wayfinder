@@ -247,10 +247,12 @@
    {:type "function"
     :function
     {:name "wait"
-     :description "Pause before your next turn — a complete, legitimate turn of doing nothing. Specify seconds (min 5, max 300). When there is nothing worth doing, this is the action to take: it costs nothing and it is not idleness. Never fill a turn with a no-op command or an unnecessary message instead. Consecutive waits are folded into a single [idle] line in your context showing when the quiet started and how long it has really lasted — check it to know how long you have actually been waiting."
+     :description "Pause before your next turn — a complete, legitimate turn of doing nothing. Give either seconds (5 to 14400; longer requests are silently capped at 4 hours) or until, a local time to sleep until ('21:30' or '2026-09-18T21:30'; a bare clock time means its next occurrence). When nothing is happening, prefer long sleeps: each wake costs a full re-read of your context, so one 4-hour wait costs far less than forty 5-minute ones. When there is nothing worth doing, this is the action to take: it costs nothing and it is not idleness. Never fill a turn with a no-op command or an unnecessary message instead. Consecutive waits are folded into a single [idle] line in your context showing when the quiet started and how long it has really lasted — check it to know how long you have actually been waiting."
      :parameters
      {:type "object"
       :properties
       {:seconds {:type "integer"
-                 :description "Seconds to wait (5-300)"}}
-      :required ["seconds"]}}}])
+                 :description "Seconds to wait (5-14400; longer values are capped)"}
+       :until {:type "string"
+               :description "Local time to sleep until: '21:30' or '2026-09-18T21:30'. A bare clock time means its next occurrence (tomorrow if it has passed). Overrides seconds."}}
+      }}}])
