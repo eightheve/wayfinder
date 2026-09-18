@@ -431,6 +431,40 @@
           {:ok? true})
         {:ok? false}))))
 
+(defn delete-note
+  "Deterministic direct delete from the main agent — the same trash/ recovery
+   path curation uses. A missing file reports {:ok? false} instead of failing."
+  [cfg path]
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
+          path (if (.endsWith path ".md") path (str path ".md"))
+          f (File. dir path)]
+      (if (.exists f)
+        (do
+          (delete-memory-file dir path)
+          (println (format "[scribe] DELETE %s" path))
+          {:ok? true})
+        {:ok? false}))))
+
+(defn consolidate-note
+  "Deterministic consolidation from the main agent: write the consolidated
+   file, then delete the sources. A source equal to the target is overwritten,
+   not deleted — merging a file into itself must not destroy it."
+  [cfg paths filename content]
+  (locking scribe-io-lock
+    (let [dir (ensure-dir (memory-dir cfg))
+          norm (fn [p] (if (.endsWith p ".md") p (str p ".md")))
+          target (norm filename)
+          sources (->> paths (map str) (map norm) distinct (remove #(= target %)))
+          existing (filter #(.exists (File. dir %)) sources)]
+      ;; Write before delete: a failed write leaves the sources untouched, and
+      ;; trash/ keeps every removed source recoverable either way.
+      (write-memory-file dir target content cfg)
+      (doseq [p existing]
+        (delete-memory-file dir p))
+      (println (format "[scribe] CONSOLIDATE %d files -> %s" (count existing) target))
+      {:ok? true :target target :deleted (count existing)})))
+
 (defn list-memories [cfg]
   (let [dir (ensure-dir (memory-dir cfg))
         index (scan-index dir)]

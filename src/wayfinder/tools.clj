@@ -132,7 +132,7 @@
    {:type "function"
     :function
     {:name "remember"
-     :description "Write a note directly to your long-term memory. Use this whenever you learn something worth keeping: facts about the user, decisions, system knowledge, ongoing projects. The write is immediate and guaranteed — no intermediary."
+     :description "Write a note directly to your long-term memory. Use this whenever you learn something worth keeping: facts about the user, decisions, system knowledge, ongoing projects. The write is immediate and guaranteed — no intermediary. Writing to an existing filename replaces its content entirely — that is how you edit a memory: read it, then write the full updated version."
      :parameters
      {:type "object"
       :properties
@@ -167,6 +167,33 @@
        :to {:type "string"
             :description "New memory file path"}}
       :required ["from" "to"]}}}
+
+   {:type "function"
+    :function
+    {:name "delete-memory"
+     :description "Delete a memory file. It moves to a trash folder, not destroyed. Use for memories that are wrong, obsolete, or fully absorbed into another file."
+     :parameters
+     {:type "object"
+      :properties
+      {:path {:type "string"
+              :description "The filename of the memory to delete"}}
+      :required ["path"]}}}
+
+   {:type "function"
+    :function
+    {:name "consolidate-memories"
+     :description "Merge several memory files into one: writes `filename` with `content`, then deletes the source files. Use when multiple files cover the same topic or overlap heavily. Read the sources first — the content you give fully replaces them."
+     :parameters
+     {:type "object"
+      :properties
+      {:paths {:type "array"
+               :items {:type "string"}
+               :description "Memory files to merge and delete"}
+       :filename {:type "string"
+                  :description "Filename for the consolidated memory, e.g. 'projects/garden.md'"}
+       :content {:type "string"
+                 :description "Full consolidated content. First line must be a one-line summary."}}
+      :required ["paths" "filename" "content"]}}}
 
    {:type "function"
     :function

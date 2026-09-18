@@ -475,6 +475,27 @@
                                      (catch Exception e
                                        (str "Error moving: " (.getMessage e))))})
 
+                     (= action-type :delete-memory)
+                     (do (println (format "[agent] DELETE-MEMORY %s" (:path params)))
+                         {:content (try
+                                     (if (:ok? (scribe/delete-note cfg (:path params)))
+                                       (format "Deleted %s (moved to trash)" (:path params))
+                                       (format "Delete failed: %s not found" (:path params)))
+                                     (catch Exception e
+                                       (str "Error deleting: " (.getMessage e))))})
+
+                     (= action-type :consolidate-memories)
+                     (do (println (format "[agent] CONSOLIDATE -> %s" (:filename params)))
+                         {:content (try
+                                     (if (seq (:paths params))
+                                       (let [{:keys [target deleted]}
+                                             (scribe/consolidate-note
+                                               cfg (:paths params) (:filename params) (:content params))]
+                                         (format "Wrote %s, deleted %d source(s)" target deleted))
+                                       "Error: no source paths given")
+                                     (catch Exception e
+                                       (str "Error consolidating: " (.getMessage e))))})
+
                      (= action-type :remember)
                      (do (println (format "[agent] REMEMBER %s" (:filename params)))
                          {:content (try
