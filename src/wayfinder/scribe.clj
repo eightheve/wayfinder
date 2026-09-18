@@ -690,18 +690,33 @@
 (def ^:private default-cue-threshold 0.75)
 (def ^:private default-cue-max 2)
 (def ^:private default-cue-cooldown 50)
+(def ^:private default-cue-full-threshold 0.9)
 
 (defn- cue-config [cfg]
   {:enabled? (not (false? (:cues-enabled? cfg)))
    :threshold (or (:cue-threshold cfg) default-cue-threshold)
    :max-cues (or (:cue-max cfg) default-cue-max)
-   :cooldown (or (:cue-cooldown-items cfg) default-cue-cooldown)})
+   :cooldown (or (:cue-cooldown-items cfg) default-cue-cooldown)
+   :full-threshold (or (:cue-full-threshold cfg) default-cue-full-threshold)})
 
 (def ^:private cue-stamp
   (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss"))
 
 (defn- now-stamp []
   (.format (java.time.LocalDateTime/now) cue-stamp))
+
+(defn- cue-full-text
+  "A very-high-confidence cue carries the memory itself, not just its address.
+   The 8000-char cap matches the read-memory tool: one cue must not be able to
+   flood the context with a single huge file."
+  [dir path]
+  (let [content (read-memory-file dir path)
+        total (count content)]
+    (str "⟪memory cue (strong match) — full contents of " path ":⟫\n"
+         (if (> total 8000)
+           (str (trunc content 8000)
+                (format "\n...[truncated, %d chars total]" total))
+           content))))
 
 (defn- cue-text [summary path]
   (format "⟪memory cue: you have a memory that may relate — \"%s\" (%s). Recall it if useful; ignore if not.⟫"
@@ -724,7 +739,7 @@
    or any failure at all means one log line and nothing else — this path
    never surfaces an error to the agent."
   [ctx cfg text]
-  (let [{:keys [enabled? threshold max-cues cooldown]} (cue-config cfg)
+  (let [{:keys [enabled? threshold max-cues cooldown full-threshold]} (cue-config cfg)
         embed-cfg (embedding-config cfg)
         embed-model (:model embed-cfg)
         jev? (jev/available? cfg)]
@@ -751,14 +766,22 @@
           ;; entry — like reason and wait, being reminded of something is
           ;; not doing something.
           (doseq [{:keys [md-path summary score]} candidates]
-            (let [at (now-stamp)]
-              (println (format "[scribe] CUE FIRED %s memory=%s score=%.3f threshold=%.2f"
-                         at md-path score (double threshold)))
+            (let [at (now-stamp)
+                  full? (>= score full-threshold)
+                  ;; A file can vanish between index scan and read; fall back to the
+                  ;; summary cue rather than aborting the whole pass.
+                  content (if full?
+                            (try (cue-full-text dir md-path)
+                                 (catch Exception _ (cue-text summary md-path)))
+                            (cue-text summary md-path))]
+              (println (format "[scribe] CUE FIRED %s memory=%s score=%.3f threshold=%.2f%s"
+                         at md-path score (double threshold) (if full? " FULL" "")))
               (swap! ctx (fn [c]
                            (-> c
-                               (context/add-item :memory-cue {:content (cue-text summary md-path)
+                               (context/add-item :memory-cue {:content content
                                                               :memory md-path
                                                               :score score
+                                                              :full? (boolean full?)
                                                               :at at})
                                (assoc-in [:cue-log md-path] (:next-id c)))))))
           (when (and (empty? candidates) (seq ranked))

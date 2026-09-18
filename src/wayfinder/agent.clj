@@ -226,7 +226,7 @@
                                   (when-not (newsless-result? c)
                                     (str "[tool result|" (get-in item [:data :caused-by]) "] " (trunc c context-line-max))))
                  :memory (str "[memory recall] " (trunc (get-in item [:data :content]) context-line-max))
-                 :memory-cue (str "[memory cue] " (get-in item [:data :content]))
+                 :memory-cue (str "[memory cue] " (trunc (get-in item [:data :content]) context-line-max))
                  :system-note (str "[system] " (get-in item [:data :content]))
                  nil)))
        (take-last n)

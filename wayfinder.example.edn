@@ -52,6 +52,7 @@
  ;; :cue-threshold 0.75
  ;; :cue-max 2
  ;; :cue-cooldown-items 50
+ ;; :cue-full-threshold 0.9    ;; cue score that inserts the full memory instead of the summary line
  ;; :tools-dir "/home/wayfinder/tools"   ;; directory of .clj tool manifests (default: ~/tools)
  ;; :tools-watch-ms 1000                     ;; tool dir polling interval
  ;; :typing-debounce-ms 8000        ;; quiet gap before a burst of user messages wakes the agent
