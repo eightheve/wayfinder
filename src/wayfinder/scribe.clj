@@ -55,18 +55,38 @@
                md-path)]
     (str base ".json")))
 
+(defn- drop-stale-sidecar
+  "Delete the embedding sidecar belonging to an .md file. A missing embedding
+   degrades recall gracefully; a WRONG embedding lies: a sidecar left behind
+   after a failed embedding call still embeds the file's previous content,
+   so recall silently scores against outdated text instead of admitting the
+   gap. Best-effort: failures are logged, never thrown."
+  [dir md-path]
+  (try
+    (let [sidecar (File. dir (sidecar-path md-path))]
+      (when (.exists sidecar)
+        (.delete sidecar)
+        (println (format "[scribe] dropped stale sidecar for %s" md-path))))
+    (catch Exception e
+      (println (format "[scribe] stale sidecar cleanup failed for %s: %s"
+                 md-path (.getMessage e))))))
+
 (defn- write-embedding-sidecar [dir md-path content cfg]
   (let [embed-cfg (embedding-config cfg)]
     (when-let [embed-model (:model embed-cfg)]
       (try
         (let [embedding (llm/embed (:base-url embed-cfg) (:api-key embed-cfg) embed-model content)]
-          (when embedding
+          (if embedding
             (let [sidecar (File. dir (sidecar-path md-path))
                   data (json/generate-string {:embedding embedding :summary (first (clojure.string/split-lines content))})]
               (.mkdirs (.getParentFile sidecar))
-              (spit sidecar data))))
+              (spit sidecar data))
+            ;; nil embedding is still a failure: drop the previous content's
+            ;; sidecar instead of letting recall score against stale text.
+            (drop-stale-sidecar dir md-path)))
         (catch Exception e
-          (println (format "[scribe] Embedding failed for %s: %s" md-path (.getMessage e))))))))
+          (println (format "[scribe] Embedding failed for %s: %s" md-path (.getMessage e)))
+          (drop-stale-sidecar dir md-path))))))
 
 (defn- write-memory-file [dir filename content cfg]
   (let [f (File. dir filename)]
@@ -734,10 +754,13 @@
   (str (or (:state-dir cfg) "/var/lib/wayfinder") "/curate-cursor.edn"))
 
 (defn- ensure-curate-cursor
-  "Seed the rotation cursor from disk once per process: the last completed
-   chunk index survives restarts, so a reboot resumes the cycle instead of
-   restarting it. Missing or malformed file just means chunk 0 — logged,
-   never thrown."
+  "Seed the rotation cursor from disk once per process: the persisted cursor
+   is the chunk queue itself (vectors of path strings) plus a position into
+   it, so a reboot resumes mid-cycle and — crucially — reviews exactly the
+   files the tick that built the queue assigned, even though deletions in
+   between have reshaped the directory. Legacy single-integer cursors
+   ({:chunk n}, no :queue) and malformed files are ignored: the next tick
+   simply rebuilds a fresh queue. Every failure is logged, never thrown."
   [cfg]
   (when (nil? @curate-cursor)
     (locking curate-cursor
@@ -746,19 +769,19 @@
           (let [f (File. (curate-cursor-file cfg))]
             (when (.exists f)
               (let [state (clojure.edn/read-string (slurp f))]
-                (if (and (map? state) (int? (:chunk state)))
+                (if (and (map? state) (vector? (:queue state)) (int? (:pos state)))
                   (do (reset! curate-cursor state)
-                      (println (format "[scribe] curate cursor resumed at chunk %d (%s)"
-                                 (:chunk state) (:at state))))
-                  (println "[scribe] curate-cursor.edn malformed — starting at chunk 0")))))
+                      (println (format "[scribe] curate cursor resumed: queue of %d chunks at pos %d (%s)"
+                                 (count (:queue state)) (:pos state) (:at state))))
+                  (println "[scribe] curate-cursor.edn has no usable queue — rebuilding from scan")))))
           (catch Exception e
-            (println (format "[scribe] curate cursor unreadable — starting at chunk 0 (%s)"
+            (println (format "[scribe] curate cursor unreadable — rebuilding from scan (%s)"
                        (.getMessage e)))))))))
 
 (defn- save-curate-cursor
-  "Persist the cursor after a successful pass. Failure to write is logged,
-   not thrown: worst case a restart resumes from an older chunk and some
-   files get a second look sooner."
+  "Persist the cursor (queue + position) after a successful pass. Failure to
+   write is logged, not thrown: worst case a restart rebuilds a fresh queue
+   from the live scan and some files get a second look sooner."
   [cfg cursor-state]
   (try
     (let [f (File. (curate-cursor-file cfg))]
@@ -909,8 +932,17 @@
       (if (.exists dst)
         dst
         (let [parent (.getParentFile dir)
+              ;; .json sidecars are excluded too: embeddings are
+              ;; near-deterministic recomputations of the content and the
+              ;; sidecar summary is just the file's own first line, so
+              ;; archiving 4.2MB of float arrays that regenerate on write
+              ;; is waste. A restored file regenerates its sidecar on its
+              ;; next write and recall degrades gracefully (Jev-only
+              ;; scoring) until then. The pattern contains no slash, so
+              ;; GNU tar matches it at any depth.
               result (sh/sh "tar" "-czf" (.getPath dst) "-C" (.getPath parent)
-                            "--exclude=memory/archive" "--exclude=memory/trash" "memory")]
+                            "--exclude=memory/archive" "--exclude=memory/trash"
+                            "--exclude=*.json" "memory")]
           (if (zero? (:exit result))
             (do
               (println (format "[scribe] BACKUP wrote %s (%d KB)"
@@ -1025,13 +1057,88 @@
      {:role "user"
       :content "Review your assigned chunk now."}]))
 
+;; Reference repair bounds: .md files past the char limit are skipped
+;; wholesale (scanning huge notes for substrings is not worth a repair
+;; sweep), and the appends per tick are capped so one heavy curation pass
+;; cannot spend the whole tick rewriting referrers.
+(def ^:private refpair-scan-char-limit 50000)
+(def ^:private refpair-max-repairs 20)
+
+(defn- repair-dangling-refs
+  "Merges must not leave the memory graph lying: every note that pointed at
+   a file this pass deleted now dangles. For each deleted path, every live
+   .md file still mentioning it gets an append-only tombstone line —
+   preserving the audit trail without rewriting someone's prose, and keeping
+   later recall from resurrecting dead links. Deterministic and fail-open:
+   one bad file logs and moves on, never throws."
+  [dir cfg jev-deleted results]
+  (let [;; Jev deletes already executed above; the scribe's own delete-memory
+        ;; tool calls during the LLM pass may have removed more.
+        deleted (->> (concat jev-deleted
+                             (keep (fn [{:keys [action]}]
+                                     (when (= :delete-memory (:action-type action))
+                                       (get-in action [:params :path])))
+                                   results))
+                     (map str)
+                     distinct
+                     sort)
+        live-md (->> (scan-index dir)
+                     (filter (fn [{:keys [path]}] (.endsWith path ".md")))
+                     vec)
+        live-paths (set (map :path live-md))
+        ;; Only truly absent paths get tombstones: a delete that failed, or a
+        ;; file the scribe re-created under the same name this very pass,
+        ;; leaves nothing dangling.
+        dangling (vec (remove live-paths deleted))
+        ;; Snapshot each surviving file once: detection runs against the
+        ;; pre-repair text, so a tombstone appended for one path can never
+        ;; make its own file look like a fresh referrer of another one.
+        contents (into {}
+                       (keep (fn [{:keys [path]}]
+                               (let [f (File. dir path)]
+                                 (when (.exists f)
+                                   (let [text (slurp f)]
+                                     (when (<= (count text) refpair-scan-char-limit)
+                                       [path text]))))))
+                       live-md)
+        refs (sort (for [p dangling
+                         [referrer text] contents
+                         :when (and (not= referrer p)
+                                    (clojure.string/includes? text p))]
+                     [referrer p]))]
+    (when (seq refs)
+      (let [repairs (take refpair-max-repairs refs)
+            deferred (- (count refs) (count repairs))
+            date-stamp (str (java.time.LocalDate/now))]
+        (when (pos? deferred)
+          (println (format "[scribe] REFPAIR: %d dangling references found — repairing %d, %d left for later ticks"
+                     (count refs) (count repairs) deferred)))
+        (doseq [[referrer p] repairs]
+          (try
+            (let [f (File. dir referrer)]
+              ;; write-memory-file re-embeds the appended file — fine, and
+              ;; desired: its sidecar should reflect the tombstone too. This
+              ;; all runs inside scribe-io-lock, so no pass can interleave.
+              (write-memory-file dir referrer
+                                 (str (slurp f)
+                                      (format "\n\n> [curation %s] the file this note referenced (`%s`) was merged or deleted during curation; its surviving content lives in the topical files of this directory."
+                                              date-stamp p))
+                                 cfg))
+            (println (format "[scribe] REFPAIR: %s → %s" referrer p))
+            (catch Exception e
+              (println (format "[scribe] REFPAIR failed for %s → %s: %s"
+                         referrer p (.getMessage e))))))))))
+
 (defn curate
   "One rotation tick: run the hygiene step (purge stale trash, cap the
    archive/trash sinks, snapshot the daily backup), then review exactly one
    topic-coherent chunk — Jev's delete verdicts execute deterministically
    (files move to trash/, nothing is lost) and every other verdict is only a
-   hint for the LLM pass. Each successful tick advances the persisted cursor
-   by one chunk, so full coverage arrives in chunk-count ticks without any
+   hint for the LLM pass. The persisted cursor stores the chunk queue itself,
+   not merely an index into a recomputed layout: deletions during a cycle
+   reshape any freshly derived layout, so a re-derived index would silently
+   point at the wrong files. Each successful tick advances the position by
+   one queue slot, so full coverage arrives in chunk-count ticks without any
    single pass having to swallow the whole corpus."
   [cfg]
   (locking scribe-io-lock
@@ -1058,17 +1165,44 @@
         (if (empty? index)
           (do (println "[scribe] CURATE: memory index empty — nothing to curate")
               [])
-          (let [chunks (curate-chunks index chunk-size)
-                chunk-count (count chunks)
-                chunk-idx (mod (inc (or (:chunk @curate-cursor) -1)) chunk-count)
-                chunk (vec (nth chunks chunk-idx))
+          (let [cursor @curate-cursor
+                queued (:queue cursor)
+                cursor-pos (:pos cursor)
+                ;; The queue IS the cursor: while the persisted queue still
+                ;; has an unvisited slot, that slot names this tick's files
+                ;; exactly as the tick that built it assigned them — a
+                ;; deletion mid-cycle must not reshape the layout under our
+                ;; feet. Only a missing, legacy or exhausted cursor derives
+                ;; a fresh layout, stores the whole queue (vectors of path
+                ;; strings) and starts at pos 0.
+                [queue cursor-pos]
+                (if (and (vector? queued) (int? cursor-pos) (< cursor-pos (count queued)))
+                  [queued cursor-pos]
+                  (let [q (mapv #(mapv :path %) (curate-chunks index chunk-size))]
+                    ;; Stash the fresh queue in memory right away: even if
+                    ;; this tick dies before the save below, the next one
+                    ;; resumes this layout instead of reshaping it.
+                    (reset! curate-cursor {:queue q :pos 0 :at (str (java.time.Instant/now))})
+                    [q 0]))
+                chunk-count (count queue)
+                chunk-paths (nth queue cursor-pos)
+                ;; Resolve at execution time: paths deleted since the queue
+                ;; was built (hygiene here, or curation in an earlier tick)
+                ;; are simply skipped — coverage means every surviving path
+                ;; appears in exactly one queue slot.
+                by-path (into {} (map (fn [{:keys [path] :as entry}] [path entry])) index)
+                chunk (->> chunk-paths (keep by-path) vec)
+                gone (- (count chunk-paths) (count chunk))
+                _ (when (pos? gone)
+                    (println (format "[scribe] chunk %d: %d of %d paths already gone"
+                              (inc cursor-pos) gone (count chunk-paths))))
                 ;; Jev grades only this chunk; its per-call chunking (60
                 ;; questions) is inherited from jev-curation-verdicts itself.
                 verdicts (jev-curation-verdicts cfg dir chunk)
                 deletes (into {} (filter (fn [[_ v]] (= :delete (:verdict v))) verdicts))
                 rewrites (count (filter (fn [[_ v]] (= :rewrite (:verdict v))) verdicts))]
             (println (format "[scribe] CURATE chunk %d/%d: %d files (%s) — Jev: %d deletes, %d rewrites flagged"
-                       (inc chunk-idx) chunk-count (count chunk)
+                       (inc cursor-pos) chunk-count (count chunk)
                        (->> chunk
                             (map #(let [d (top-dir (:path %))] (if (= d "") "root" d)))
                             distinct sort
@@ -1094,9 +1228,11 @@
                   assigned (vec (remove :handled? entries))
                   results (if (seq assigned)
                             (run-scribe-turn cfg dir
-                                             (curation-messages index entries chunk-idx chunk-count)
+                                             (curation-messages index entries cursor-pos chunk-count)
                                              {:must-cover (map :path assigned)})
-                            (do (println "[scribe] CURATE: Jev deleted every file in the chunk — LLM pass skipped")
+                            (do (println (if (seq deletes)
+                                           "[scribe] CURATE: Jev deleted every file in the chunk — LLM pass skipped"
+                                           "[scribe] CURATE: nothing left to review in this chunk — LLM pass skipped"))
                                 []))
                   covered (->> results
                                (keep (fn [{:keys [action]}]
@@ -1107,10 +1243,15 @@
                                          nil)))
                                set)
                   covered-n (count (filter covered (map :path assigned)))
-                  next-idx (mod (inc chunk-idx) chunk-count)
-                  cursor-state {:chunk chunk-idx :at (str (java.time.Instant/now))}]
-              (reset! curate-cursor cursor-state)
-              (save-curate-cursor cfg cursor-state)
+                  next-state {:queue queue :pos (inc cursor-pos) :at (str (java.time.Instant/now))}]
+              (reset! curate-cursor next-state)
+              (save-curate-cursor cfg next-state)
               (println (format "[scribe] CURATE chunk %d done: %d/%d files covered, cursor → %d"
-                         (inc chunk-idx) covered-n (count assigned) next-idx))
+                         (inc cursor-pos) covered-n (count assigned) (:pos next-state)))
+              ;; Merges must not leave the memory graph lying: everything
+              ;; this pass deleted (Jev + scribe tool calls) gets its
+              ;; referrers tombstoned, append-only (fail-open; capped).
+              (try (repair-dangling-refs dir cfg (keys deletes) results)
+                   (catch Exception e
+                     (println (format "[scribe] refpair pass skipped: %s" (.getMessage e)))))
               results)))))))
